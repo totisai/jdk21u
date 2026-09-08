@@ -190,11 +190,20 @@ if [ "${PACKS:-0}" != 1 ]; then
 fi
 
 # ---- link ---------------------------------------------------------------------
+# emunet serves long-lived servers whose main() returns after starting their event
+# loops (Netty/Tomcat) — their non-daemon threads keep a real JVM alive, so the
+# runtime must NOT tear down when main() returns. Other tiers keep EXIT_RUNTIME=1.
+EXITRT=1; [ "$WANT_EMUNET" = 1 ] && EXITRT=0
+# Fixed heap up front. emunet uses 768 MB (the JVM is tuned to fit — see the demo's
+# /work/vmopts): growable shared memory fails to instantiate the pthread worker pool
+# in some browsers, and Safari refuses the default 1.5 GB SharedArrayBuffer.
+MEMFLAGS="-sINITIAL_MEMORY=1610612736"
+[ "$WANT_EMUNET" = 1 ] && MEMFLAGS="-sINITIAL_MEMORY=805306368"
 emcc web/launcher_web.c "$BIN/symtab.o" $EXTRA_OBJS $BASE_OBJS \
      "$FFI/lib/libffi.a" -I jdk/include -I jdk/include/emscripten \
   $EXTRA_FLAGS \
   -pthread -sPTHREAD_POOL_SIZE=48 -sPTHREAD_POOL_SIZE_STRICT=0 -sPROXY_TO_PTHREAD \
-  -sINITIAL_MEMORY=1610612736 -sSTACK_SIZE=8388608 -sWASM_BIGINT -sERROR_ON_UNDEFINED_SYMBOLS=0 -sEXIT_RUNTIME=1 \
+  $MEMFLAGS -sSTACK_SIZE=8388608 -sWASM_BIGINT -sERROR_ON_UNDEFINED_SYMBOLS=0 -sEXIT_RUNTIME=$EXITRT \
   -lidbfs.js -sALLOW_TABLE_GROWTH \
   -sEXPORT_NAME=createJVM -sMODULARIZE=1 -sFORCE_FILESYSTEM=1 \
   -sEXPORTED_RUNTIME_METHODS=FS,IDBFS,ENV,callMain,addRunDependency,removeRunDependency,addFunction,HEAPU8,HEAP32,ccall,cwrap \

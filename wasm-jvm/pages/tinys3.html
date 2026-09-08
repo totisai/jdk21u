@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TinyS3 in the browser — OpenJDK on WebAssembly</title>
+<link rel="stylesheet" href="assets/site.css">
+<script src="coi-serviceworker.js"></script>
+<style>
+  html,body{height:100%}
+  body{margin:0;overflow:hidden;background:#0b0f14}
+  /* id selectors with display:flex/grid otherwise beat the `hidden` attribute */
+  [hidden]{display:none!important}
+  :root{--console-h:180px}
+  /* ---- skeleton loader (full viewport during boot) ---- */
+  #skeleton{position:fixed;top:0;left:0;right:0;bottom:var(--console-h);display:flex;flex-direction:column;background:var(--bg);z-index:20}
+  #skeleton .bar{height:44px;border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:8px;padding:0 14px;background:var(--panel2)}
+  #skeleton .dot{width:12px;height:12px;border-radius:50%;background:var(--edge)}
+  #skeleton .url{flex:1;max-width:520px;height:22px;border-radius:11px;background:var(--edge);margin-left:10px}
+  #skeleton .body{flex:1;display:grid;grid-template-columns:220px 1fr;gap:0}
+  #skeleton .side{border-right:1px solid var(--edge);padding:16px}
+  #skeleton .main{padding:16px}
+  .shimmer{background:linear-gradient(90deg,#161b22 25%,#20262e 37%,#161b22 63%);background-size:400% 100%;animation:sh 1.3s ease infinite;border-radius:6px}
+  @keyframes sh{0%{background-position:100% 0}100%{background-position:-100% 0}}
+  #skeleton .row{height:14px;margin:10px 0}
+  #boot-status{position:fixed;left:0;right:0;bottom:calc(var(--console-h) + 14px);text-align:center;color:var(--dim);font-size:13px;z-index:21}
+  #boot-status .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--edge);border-top-color:var(--accent);border-radius:50%;animation:rot .8s linear infinite;vertical-align:-2px;margin-right:8px}
+  @keyframes rot{to{transform:rotate(360deg)}}
+
+  /* ---- browser-in-browser chrome (full viewport) ---- */
+  #browser{position:fixed;top:0;left:0;right:0;bottom:var(--console-h);display:flex;flex-direction:column;z-index:10}
+  .chrome{height:44px;background:var(--panel2);border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:10px;padding:0 12px;flex:none}
+  .lights{display:flex;gap:7px}
+  .lights i{width:12px;height:12px;border-radius:50%;display:block}
+  .lights .r{background:#ff5f57}.lights .y{background:#febc2e}.lights .g{background:#28c840}
+  .navbtns{display:flex;gap:2px;color:var(--faint);font-size:16px}
+  .navbtns span{padding:0 5px;cursor:default}
+  .urlbar{flex:1;max-width:640px;display:flex;align-items:center;gap:8px;background:#0b0f14;border:1px solid var(--edge);border-radius:14px;height:28px;padding:0 12px;color:var(--ink);font-size:13px;font-family:var(--sans)}
+  .urlbar .lock{color:var(--ok);font-size:12px}
+  .urlbar .host{color:var(--ink)}.urlbar .path{color:var(--dim)}
+  .chrome .tag{margin-left:auto;font-size:11px;color:var(--accent);border:1px solid var(--edge);border-radius:999px;padding:2px 10px}
+  .content{flex:1;min-height:0;display:grid;grid-template-columns:240px 1fr;background:var(--bg)}
+  .side{border-right:1px solid var(--edge);display:flex;flex-direction:column;min-height:0}
+  .side h3{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin:0;padding:14px 16px 8px}
+  .buckets{flex:1;overflow:auto;padding:0 8px}
+  .bkt{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;color:var(--ink);font-size:14px;cursor:pointer}
+  .bkt:hover{background:var(--panel)}
+  .bkt.active{background:var(--panel);color:var(--accent)}
+  .newbkt{display:flex;gap:6px;padding:10px 12px;border-top:1px solid var(--edge)}
+  .newbkt input{flex:1;background:#0b0f14;border:1px solid var(--edge);border-radius:6px;color:var(--ink);padding:6px 8px;font-size:13px}
+  .main{display:flex;flex-direction:column;min-height:0}
+  .toolbar{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--edge)}
+  .toolbar .crumb{font-size:14px;color:var(--ink)}
+  .toolbar .crumb b{color:var(--accent)}
+  .toolbar .sp{flex:1}
+  .btn{background:var(--accent);color:#111;border:none;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer;font-size:13px}
+  .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--edge)}
+  .btn:disabled{opacity:.5;cursor:default}
+  .objects{flex:1;overflow:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 16px;border-bottom:1px solid var(--edge)}
+  th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--bg)}
+  td.key{color:var(--ink);font-family:var(--mono)} td.size{color:var(--dim);white-space:nowrap}
+  td.act{text-align:right;white-space:nowrap}
+  td.act a{color:var(--accent2);text-decoration:none;margin-left:12px;cursor:pointer;font-size:12.5px}
+  .empty{color:var(--faint);padding:30px 16px;text-align:center}
+  .drop{border:1px dashed var(--edge);border-radius:8px;margin:14px 16px;padding:18px;text-align:center;color:var(--dim);font-size:13px}
+  .drop.hot{border-color:var(--accent);color:var(--accent)}
+
+  /* ---- VM console (bottom, always visible) ---- */
+  #vmconsole{position:fixed;left:0;right:0;bottom:0;height:var(--console-h);z-index:40;display:flex;flex-direction:column;
+    background:#07090c;border-top:1px solid var(--edge)}
+  #vmconsole .hd{display:flex;align-items:center;gap:10px;padding:5px 12px;border-bottom:1px solid var(--edge);background:var(--panel2);flex:none}
+  #vmconsole .hd .t{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)}
+  #vmconsole .hd .phase{font-size:12px;color:var(--accent)}
+  #vmconsole .hd .sp{flex:1}
+  #vmconsole .hd button{background:transparent;border:1px solid var(--edge);color:var(--dim);border-radius:5px;font-size:11px;padding:3px 8px;cursor:pointer}
+  #vmlog{flex:1;overflow:auto;margin:0;padding:8px 12px;font-family:var(--mono);font-size:11.5px;line-height:1.45;color:var(--dim);white-space:pre-wrap;word-break:break-word}
+  #vmlog .err{color:var(--err)} #vmlog .ok{color:var(--ok)}
+  body.consoleClosed{--console-h:30px}
+  body.consoleClosed #vmlog{display:none}
+
+  /* ---- closable "running on wasm" banner ---- */
+  #wasmban{position:fixed;right:16px;bottom:calc(var(--console-h) + 16px);z-index:30;display:flex;align-items:center;gap:10px;
+    background:var(--panel);border:1px solid var(--edge);border-left:3px solid var(--accent);border-radius:10px;
+    padding:10px 12px;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:300px;font-size:12.5px;color:var(--ink)}
+  #wasmban .ico{font-size:16px}
+  #wasmban .txt b{color:var(--accent)}
+  #wasmban .txt span{color:var(--dim)}
+  #wasmban .x{margin-left:6px;color:var(--faint);cursor:pointer;font-size:15px;line-height:1}
+  #wasmban .x:hover{color:var(--ink)}
+</style>
+</head>
+<body>
+
+<!-- skeleton while the VM boots -->
+<div id="skeleton">
+  <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url shimmer"></span></div>
+  <div class="body">
+    <div class="side"><div class="row shimmer" style="width:60%"></div><div class="row shimmer" style="width:80%"></div><div class="row shimmer" style="width:70%"></div><div class="row shimmer" style="width:50%"></div></div>
+    <div class="main"><div class="row shimmer" style="width:40%;height:22px"></div><div class="row shimmer"></div><div class="row shimmer"></div><div class="row shimmer" style="width:90%"></div><div class="row shimmer" style="width:85%"></div></div>
+  </div>
+</div>
+<div id="boot-status"><span class="spin"></span><span id="boot-text">starting…</span></div>
+
+<!-- the "browser inside the browser" -->
+<div id="browser" hidden>
+  <div class="chrome">
+    <span class="lights"><i class="r"></i><i class="y"></i><i class="g"></i></span>
+    <span class="navbtns"><span>‹</span><span>›</span><span id="reload" style="cursor:pointer">⟳</span></span>
+    <div class="urlbar"><span class="lock">🔒</span><span class="host">tinys3.totis.ai</span><span class="path" id="urlpath">/console</span></div>
+    <span class="tag">WebAssembly · no server</span>
+  </div>
+  <div class="content">
+    <div class="side">
+      <h3>Buckets</h3>
+      <div class="buckets" id="buckets"></div>
+      <div class="newbkt"><input id="newbkt" placeholder="new-bucket-name"><button class="btn" id="mkbkt">+</button></div>
+    </div>
+    <div class="main">
+      <div class="toolbar">
+        <span class="crumb" id="crumb">Select a bucket</span>
+        <span class="sp"></span>
+        <button class="btn ghost" id="refresh">Refresh</button>
+        <button class="btn" id="uploadbtn" disabled>Upload file</button>
+        <input type="file" id="file" multiple hidden>
+      </div>
+      <div class="drop" id="drop" hidden>Drop files here to upload to <b id="dropbkt"></b></div>
+      <div class="objects" id="objects"><div class="empty">Booting TinyS3…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- closable running-on-wasm banner -->
+<div id="wasmban" hidden>
+  <span class="ico">⚡</span>
+  <span class="txt"><b>Running on WebAssembly</b><br><span>A real TinyS3 server (Java/Netty) inside this tab, over an emulated TCP loopback — no network.</span></span>
+  <span class="x" id="banx">×</span>
+</div>
+
+<!-- VM console (stdout/stderr from inside the JVM) -->
+<div id="vmconsole">
+  <div class="hd"><span class="t">VM console</span><span class="phase" id="phase">booting…</span><span class="sp"></span>
+    <button id="clearlog">clear</button><button id="togglelog">hide</button></div>
+  <pre id="vmlog"></pre>
+</div>
+
+<script src="jvm/jvm-tinys3.js"></script>
+<script type="module">
+import { S3Client, ListBucketsCommand, CreateBucketCommand, ListObjectsV2Command, PutObjectCommand, GetObjectCommand, DeleteObjectCommand }
+  from './jvm/aws-s3.mjs';
+import { emunetHttpHandler } from './jvm/emunetS3Handler.js';
+import { emuSend } from './jvm/emunet.js';
+
+const $ = (id) => document.getElementById(id);
+const bootText = $('boot-text');
+let mod = null, s3 = null, currentBucket = null;
+
+// VM console: show everything the JVM writes to stdout/stderr.
+const vmlog = $('vmlog');
+function vlog(s, cls) {
+  const sp = document.createElement('span'); if (cls) sp.className = cls;
+  sp.textContent = s.endsWith('\n') ? s : s + '\n';
+  vmlog.appendChild(sp); vmlog.scrollTop = vmlog.scrollHeight;
+}
+function phase(t) { $('phase').textContent = t; bootText.textContent = t; }
+$('clearlog').onclick = () => { vmlog.textContent = ''; };
+$('togglelog').onclick = (e) => { document.body.classList.toggle('consoleClosed'); e.target.textContent = document.body.classList.contains('consoleClosed') ? 'show' : 'hide'; };
+window.addEventListener('unhandledrejection', ev => vlog('[unhandled] ' + (ev.reason && (ev.reason.stack || ev.reason.message) || ev.reason), 'err'));
+window.addEventListener('error', ev => vlog('[error] ' + (ev.message || ev.error), 'err'));
+
+// ---- boot the wasm JVM + TinyS3 (baked into /app/lib) --------------------------
+async function boot() {
+  if (!window.crossOriginIsolated) throw new Error('not cross-origin isolated (reload to activate the service worker)');
+  if (!window.createJVM) throw new Error('runtime failed to load (jvm/jvm-tinys3.js)');
+  phase('downloading runtime (~80 MB, first load only)…');
+  const gz = await fetch('jvm/jvm-tinys3.data.gz');
+  if (!gz.ok) throw new Error('fetch data.gz ' + gz.status);
+  const buf = await new Response(gz.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+  phase('starting the JVM + TinyS3 (Netty)…');
+  let ready = false;
+  mod = await window.createJVM({
+    arguments: ['dev.totis.tinys3.Application'],
+    getPreloadedPackage: () => buf,
+    locateFile: (p) => 'jvm/' + p.replace('jvm-base-emunet', 'jvm-tinys3'),
+    preRun: [M => {
+      const mk = (p) => { let q = ''; for (const s of p.split('/')) { if (!s) continue; q += '/' + s; try { M.FS.mkdir(q); } catch (e) {} } };
+      mk('/work'); mk('/work/data');
+      M.FS.writeFile('/work/classpath', '/app/lib/tinys3-all.jar');
+      M.FS.writeFile('/work/addmods', 'ALL-SYSTEM');
+      M.FS.writeFile('/work/args', ['server', '/work/data'].join('\n'));
+      M.FS.writeFile('/work/vmopts', [
+        // Boot tiny: without these the JVM self-sizes to the wasm heap (~1.3 GB) and
+        // Netty pre-allocates fat pooled arenas + cores×2 event-loop threads.
+        '-Xmx128m', '-Xms16m', '-XX:MaxMetaspaceSize=160m', '-Xss512k',
+        '-XX:MaxDirectMemorySize=32m', '-XX:+UseSerialGC',
+        '-Dio.netty.allocator.type=unpooled', '-Dio.netty.eventLoopThreads=2',
+        '-Dtinys3.fsync=none',
+        '--add-opens=java.base/java.lang=ALL-UNNAMED', '--add-opens=java.base/java.io=ALL-UNNAMED',
+        '--add-opens=java.base/java.nio=ALL-UNNAMED', '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED'].join('\n'));
+      M.ENV = M.ENV || {}; M.ENV.TINYS3_ROOT_USER = 'admin'; M.ENV.TINYS3_ROOT_PASSWORD = 'password';
+    }],
+    print: s => { if (!/unsupported syscall/.test(s)) vlog(s); if (/Console:|API:\s+http|Started .*Application/.test(s)) ready = true; },
+    printErr: s => { if (!/unsupported syscall/.test(s)) vlog(s, 'err'); },
+  });
+  phase('waiting for the server to bind :8000…');
+  for (let i = 0; i < 3000 && !ready; i++) await new Promise(r => setTimeout(r, 100));
+  if (!ready) throw new Error('TinyS3 did not become ready');
+  phase('ready');
+  s3 = new S3Client({
+    endpoint: 'http://127.0.0.1:8000', region: 'us-east-1', forcePathStyle: true,
+    credentials: { accessKeyId: 'admin', secretAccessKey: 'password' },
+    requestHandler: emunetHttpHandler(mod),
+  });
+}
+
+// ---- S3 console UI -------------------------------------------------------------
+function fmtSize(n) { if (n == null) return ''; if (n < 1024) return n + ' B'; if (n < 1048576) return (n/1024).toFixed(1) + ' KB'; return (n/1048576).toFixed(1) + ' MB'; }
+
+async function refreshBuckets() {
+  const out = await s3.send(new ListBucketsCommand({}));
+  const el = $('buckets'); el.innerHTML = '';
+  for (const b of (out.Buckets || [])) {
+    const d = document.createElement('div');
+    d.className = 'bkt' + (b.Name === currentBucket ? ' active' : '');
+    d.textContent = '🪣 ' + b.Name;
+    d.onclick = () => selectBucket(b.Name);
+    el.appendChild(d);
+  }
+  if (!(out.Buckets || []).length) el.innerHTML = '<div class="empty" style="padding:14px;font-size:12px">No buckets yet</div>';
+}
+
+async function selectBucket(name) {
+  currentBucket = name;
+  $('urlpath').textContent = '/console/buckets/' + name;
+  $('crumb').innerHTML = 'Bucket <b>' + name + '</b>';
+  $('uploadbtn').disabled = false; $('drop').hidden = false; $('dropbkt').textContent = name;
+  await refreshBuckets();
+  await refreshObjects();
+}
+
+async function refreshObjects() {
+  const objs = $('objects');
+  if (!currentBucket) { objs.innerHTML = '<div class="empty">Select a bucket</div>'; return; }
+  objs.innerHTML = '<div class="empty">Loading…</div>';
+  const out = await s3.send(new ListObjectsV2Command({ Bucket: currentBucket }));
+  const rows = (out.Contents || []);
+  if (!rows.length) { objs.innerHTML = '<div class="empty">Empty bucket — upload a file to see it stored in the wasm JVM.</div>'; return; }
+  let html = '<table><thead><tr><th>Key</th><th>Size</th><th>Last modified</th><th></th></tr></thead><tbody>';
+  for (const o of rows) {
+    html += `<tr><td class="key">${o.Key}</td><td class="size">${fmtSize(o.Size)}</td>` +
+      `<td class="size">${o.LastModified ? new Date(o.LastModified).toLocaleString() : ''}</td>` +
+      `<td class="act"><a data-dl="${encodeURIComponent(o.Key)}">download</a><a data-del="${encodeURIComponent(o.Key)}">delete</a></td></tr>`;
+  }
+  objs.innerHTML = html + '</tbody></table>';
+  objs.querySelectorAll('a[data-dl]').forEach(a => a.onclick = () => download(decodeURIComponent(a.dataset.dl)));
+  objs.querySelectorAll('a[data-del]').forEach(a => a.onclick = () => del(decodeURIComponent(a.dataset.del)));
+}
+
+async function upload(files) {
+  for (const f of files) {
+    const buf = new Uint8Array(await f.arrayBuffer());
+    await s3.send(new PutObjectCommand({ Bucket: currentBucket, Key: f.name, Body: buf, ContentType: f.type || 'application/octet-stream' }));
+  }
+  await refreshObjects();
+}
+
+async function download(key) {
+  const out = await s3.send(new GetObjectCommand({ Bucket: currentBucket, Key: key }));
+  const bytes = await out.Body.transformToByteArray();
+  const url = URL.createObjectURL(new Blob([bytes]));
+  const a = document.createElement('a'); a.href = url; a.download = key.split('/').pop(); a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function del(key) {
+  await s3.send(new DeleteObjectCommand({ Bucket: currentBucket, Key: key }));
+  await refreshObjects();
+}
+
+// ---- wire UI -------------------------------------------------------------------
+$('mkbkt').onclick = async () => {
+  const name = $('newbkt').value.trim(); if (!name) return;
+  try { await s3.send(new CreateBucketCommand({ Bucket: name })); $('newbkt').value = ''; await selectBucket(name); }
+  catch (e) { alert('CreateBucket failed: ' + (e.message || e)); }
+};
+$('uploadbtn').onclick = () => $('file').click();
+$('file').onchange = () => { if ($('file').files.length) upload($('file').files); $('file').value = ''; };
+$('refresh').onclick = () => refreshObjects();
+$('reload').onclick = () => { refreshBuckets(); refreshObjects(); };
+$('banx').onclick = () => { $('wasmban').hidden = true; };
+const drop = $('drop');
+['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
+drop.addEventListener('drop', e => { if (e.dataTransfer.files.length) upload(e.dataTransfer.files); });
+
+// ---- go ------------------------------------------------------------------------
+(async () => {
+  try {
+    await boot();
+    $('skeleton').hidden = true; $('boot-status').hidden = true;
+    $('browser').hidden = false; $('wasmban').hidden = false;
+    $('objects').innerHTML = '<div class="empty">Create or select a bucket to begin.</div>';
+    await refreshBuckets();
+  } catch (e) {
+    phase('error');
+    vlog('BOOT ERROR: ' + (e && e.stack || e && e.message || e), 'err');
+    $('boot-text').textContent = 'Error (see VM console below): ' + (e && e.message || e);
+    const spin = $('boot-status').querySelector('.spin'); if (spin) spin.style.display = 'none';
+  }
+})();
+</script>
+</body>
+</html>

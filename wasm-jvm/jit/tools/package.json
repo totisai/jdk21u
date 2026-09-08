@@ -1,5 +1,9 @@
 {
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.556.0",
     "puppeteer-core": "^23.11.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

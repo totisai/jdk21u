@@ -26,6 +26,11 @@ if (typeof window === 'undefined') {
         const r = event.request;
         if (r.cache === 'only-if-cached' && r.mode !== 'same-origin') return;
 
+        // Only rewrite the document navigation to carry COOP/COEP; that alone makes the
+        // page cross-origin isolated. Proxying same-origin subresources isn't needed and
+        // breaks the large runtime download in some browsers ("Load failed").
+        if (r.mode !== 'navigate') return;
+
         const request = (coepCredentialless && r.mode === 'no-cors')
             ? new Request(r, { credentials: 'omit' })
             : r;

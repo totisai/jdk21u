@@ -1,5 +1,6 @@
 /*
- * WasmJit — compiler core implementation. See interpreter/wasm/compiler/wasmCompiler.hpp.
+ * WasmJit — bytecode -> WebAssembly code emission: emit_op (the per-bytecode
+ * translator) and its helpers + the operand value-type stack. See wasmCompiler.hpp.
  */
 #include "precompiled.hpp"
 #include "interpreter/wasm/wasmJit.hpp"
@@ -34,6 +35,7 @@
 #include "utilities/ostream.hpp"
 #include "interpreter/wasm/compiler/wasmCompiler.hpp"
 #include "interpreter/wasm/core/wasmImports.hpp"
+#include "interpreter/wasm/compiler/wasmCompilerInternal.hpp"
 #ifdef __EMSCRIPTEN__
 #include <stdlib.h>
 #include <string.h>
@@ -43,45 +45,10 @@ namespace wasm {
 
 // Emit an exception/early return: pop the oop-spill frame (if any), push a dummy
 // i64 result, and return. Every return path must go through here.
-static void emit_sync_unlock(Ctx* x, Buf* c);   // fwd (defined after emit_aload)
 static void emit_early_return(Ctx* x, Buf* c){
   emit_sync_unlock(x, c);                                                              // sync method: unlock before propagating
   if (x->n_spill > 0) { bput(c,0x41); sleb(c,x->n_spill); bput(c,0x10); uleb(c,Imp::OOP_LEAVE); }  // call $leave
   bput(c,0x42); bput(c,0x00); bput(c,0x0f);                                            // i64.const 0; return
-}
-static void vpush(Ctx* x, int t);
-static int  vpop(Ctx* x);
-// C5.4 static-call intrinsic (Math/Integer/Long): classify (c==nullptr) or emit (c!=nullptr).
-static int  wasm_intrinsic(Ctx* x, Buf* c, const uint8_t* bc, int pc, int* argwords, int* rettype);
-// Operand entries a potentially-throwing op pops before it could throw.
-static int op_consumed(Ctx* x, const uint8_t* bc, int pc){
-  uint8_t op = bc[pc];
-  if (op==0xbe) return 1;                              // arraylength
-  if (op>=0x2e && op<=0x35) return 2;                  // Xaload
-  if (op>=0x4f && op<=0x56) return 3;                  // Xastore
-  if (is_getfield(op)) return 1;
-  if (is_putfield(op)) return 2;
-  if (op==0xc0) return 1;                              // checkcast
-  if (op==0xbb) return 0;                              // new
-  if (op==0xbc||op==0xbd) return 1;                    // newarray/anewarray
-  if (op==0xc5) return bc[pc+3];                        // multianewarray: ndims counts
-  if (op==0xc2||op==0xc3) return 1;                     // monitorenter/monitorexit: the object ref
-  if (op==0xbf) return 1;                              // athrow
-  if (op==0x6c||op==0x70||op==0x6d||op==0x71) return 2; // idiv/irem/ldiv/lrem
-  if (op==0xb6||op==0xb7||op==0xb9||op==0xe3) {        // invoke (incl. vfinal fast): receiver+args
-    InvokeDesc* d; int nw, rt, aw; if (resolve_invoke(x, bc, pc, op, &d, &nw, &rt, &aw)==0) return nw;
-  }
-  if (op==0xb8) {                                      // invokestatic: args (no receiver)
-    int iaw, irt;
-    if (wasm_intrinsic(x, nullptr, bc, pc, &iaw, &irt)) return iaw;   // inlined intrinsic
-    InvokeDesc* d; int nw, rt, aw;                      // general path (object args)
-    if (resolve_invoke(x, bc, pc, 0xb8, &d, &nw, &rt, &aw)==0) return nw;
-  }
-  if (op==0xba) {                                       // invokedynamic: dynamic args (no receiver)
-    IndyDesc* d; int nw, rt, aw;
-    if (resolve_indy(x, bc, pc, &d, &nw, &rt, &aw)==0) return nw;
-  }
-  return 0;
 }
 // C4: on a pending exception, either dispatch to an in-method handler or propagate.
 // Called from inside a single op-level `if` (so `br 3` reaches the dispatch loop).
@@ -124,7 +91,7 @@ static void emit_aload(Ctx* x, Buf* c, int slot){
 // C4.2 synchronized method: unlock `this` (slot 0) at a return/propagate point.
 // Loads `this` directly (no value-model mutation — this runs at exits) and calls
 // $monitorexit, dropping its pending flag (we are already returning/unwinding).
-static void emit_sync_unlock(Ctx* x, Buf* c) {
+void emit_sync_unlock(Ctx* x, Buf* c) {
   if (!x->sync_method) return;
   if (x->method->is_static()) {                       // static sync: unlock the Class mirror
     bput(c,0x41); sleb(c,(int32_t)(intptr_t)x->method->method_holder());
@@ -145,125 +112,11 @@ static void emit_astore(Ctx* x, Buf* c, int slot){
   vpop(x);
 }
 
-// Operand-stack delta in JVM words.
-static int stack_delta(Ctx* x, const uint8_t* bc, int pc) {
-  uint8_t op = bc[pc];
-  if (op == 0xc4) {                                // wide: same net stack delta as the sub-op
-    switch (bc[pc+1]) { case 0x15: case 0x17: case 0x19: return +1;   // iload/fload/aload
-                        case 0x16: case 0x18: return +2;   // lload/dload
-                        case 0x36: case 0x38: case 0x3a: return -1;   // istore/fstore/astore
-                        case 0x37: case 0x39: return -2;   // lstore/dstore
-                        case 0x84: return 0; }             // iinc
-    return -1000;
-  }
-  if (op == 0xc5) return 1 - bc[pc+3];             // multianewarray: pop ndims counts, push 1 array
-  if (op == 0xc2 || op == 0xc3) return -1;         // monitorenter/monitorexit: pop the object ref
-  if (op == 0xb8) {                                // invokestatic: ret words - arg words
-    int iaw, irt;
-    if (wasm_intrinsic(x, nullptr, bc, pc, &iaw, &irt)) return type_words(irt) - iaw;  // inlined intrinsic
-    InvokeDesc* d; int nw, rt, aw;                  // general path (object args): ret - args
-    if (resolve_invoke(x, bc, pc, 0xb8, &d, &nw, &rt, &aw) != 0) return -1000;
-    return type_words(rt) - aw;
-  }
-  if (op == 0xb6 || op == 0xb7 || op == 0xb9 || op == 0xe3) {  // invoke (incl. vfinal fast): ret - (recv+args)
-    InvokeDesc* d; int nw, rt, aw;
-    if (resolve_invoke(x, bc, pc, op, &d, &nw, &rt, &aw) != 0) return -1000;
-    return type_words(rt) - aw;
-  }
-  if (op == 0xba) {                                // invokedynamic: ret - dynamic args
-    IndyDesc* d; int nw, rt, aw;
-    if (resolve_indy(x, bc, pc, &d, &nw, &rt, &aw) != 0) return -1000;
-    return type_words(rt) - aw;
-  }
-  if (op == 0xb2 || op == 0xb3) {                  // getstatic (+words) / putstatic (-words)
-    intptr_t k; int off, tc, wt;
-    if (resolve_static_field(x, bc, pc, op==0xb3, &k, &off, &tc, &wt) != 0) return -1000;
-    return (op==0xb2 ? +1 : -1) * type_words(wt);
-  }
-  if (is_getfield(op)) {                            // getfield: pop obj(1), push field(words)
-    int off, tc, wt;
-    if (resolve_instance_field(x, bc, pc, false, &off, &tc, &wt) != 0) return -1000;
-    return type_words(wt) - 1;
-  }
-  if (is_putfield(op)) {                            // putfield: pop obj(1) + value(words)
-    int off, tc, wt;
-    if (resolve_instance_field(x, bc, pc, true, &off, &tc, &wt) != 0) return -1000;
-    return -(1 + type_words(wt));
-  }
-  if (is_switch(op)) return -1;                      // table/lookupswitch pop index
-  switch (op) {                                      // stack shuffles (JVM words)
-    case 0x58: return -2;   // pop2
-    case 0x5a: case 0x5b: return +1;  // dup_x1/dup_x2
-    case 0x5c: case 0x5d: case 0x5e: return +2;  // dup2/dup2_x1/dup2_x2
-    case 0x5f: return 0;    // swap
-    default: break;
-  }
-  if (op == 0xbe) return 0;                          // arraylength: [arr]->[len]
-  if (op == 0xbf) return -1;                         // athrow: pops the exception (then unwinds)
-  if (is_aload_elem(op))  { int tc,wt; array_elem(op,&tc,&wt); return type_words(wt) - 2; }
-  if (is_astore_elem(op)) { int tc,wt; array_elem(op,&tc,&wt); return -(2 + type_words(wt)); }
-  switch (op) {
-    // +1 word: iconst/bipush/sipush/iload*/fconst/fload*/ldc/dup
-    case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08:
-    case 0x10: case 0x11: case 0x15: case 0x1a: case 0x1b: case 0x1c: case 0x1d:
-    case 0x0b: case 0x0c: case 0x0d: case 0x17: case 0x22: case 0x23: case 0x24: case 0x25:
-    case 0x12: case 0x13: case 0x59:
-    case 0xe6: case 0xe7:                             // fast_aldc/_w (object ldc) -> +1 oop
-    case Bytecodes::_fast_iaccess_0:                  // fused this.field (int/oop/float) -> +1
-    case Bytecodes::_fast_aaccess_0: case Bytecodes::_fast_faccess_0:
-    case 0x19: case 0x2a: case 0x2b: case 0x2c: case 0x2d:
-    case 0x01:                                  // aconst_null
-    case 0xbb:                                   // new (pushes the fresh object ref)
-    case Bytecodes::_fast_aload_0: return +1;   // aload* (object)
-    // +2 words: lconst/lload*/dconst/dload*/ldc2_w
-    case 0x09: case 0x0a: case 0x16: case 0x1e: case 0x1f: case 0x20: case 0x21:
-    case 0x0e: case 0x0f: case 0x18: case 0x26: case 0x27: case 0x28: case 0x29:
-    case 0x14: return +2;
-    // -1 word: istore*/fstore*/pop/ifxx/ireturn/freturn/iadd../fadd../fcmp
-    case 0x3b: case 0x3c: case 0x3d: case 0x3e: case 0x36:
-    case 0x38: case 0x43: case 0x44: case 0x45: case 0x46:
-    case 0x3a: case 0x4b: case 0x4c: case 0x4d: case 0x4e:   // astore* (object)
-    case 0x57: case 0xac: case 0xae: case 0xb0:   // pop/ireturn/freturn/areturn
-    case 0x60: case 0x64: case 0x68: case 0x7e: case 0x80: case 0x82:
-    case 0x6c: case 0x70:                          // idiv irem
-    case 0x78: case 0x7a: case 0x7c:
-    case 0x62: case 0x66: case 0x6a: case 0x6e: case 0x72: case 0x95: case 0x96:  // +frem
-    case 0x99: case 0x9a: case 0x9b: case 0x9c: case 0x9d: case 0x9e:
-    case 0xc6: case 0xc7: return -1;               // ifnull/ifnonnull
-    // -2 words: lstore*/dstore*/lreturn/dreturn/if_icmp/ladd../dadd..
-    case 0x37: case 0x3f: case 0x40: case 0x41: case 0x42:
-    case 0x39: case 0x47: case 0x48: case 0x49: case 0x4a:
-    case 0xad: case 0xaf:
-    case 0x9f: case 0xa0: case 0xa1: case 0xa2: case 0xa3: case 0xa4:
-    case 0xa5: case 0xa6:                          // if_acmpeq/ne
-    case 0x61: case 0x65: case 0x69: case 0x7f: case 0x81: case 0x83:
-    case 0x6d: case 0x71:                          // ldiv lrem
-    case 0x63: case 0x67: case 0x6b: case 0x73: case 0x77: case 0x75: return -2;  // +drem
-    // long/double shifts: pop i64+i32 push i64 => -1
-    case 0x79: case 0x7b: case 0x7d: return -1;
-    // lcmp/dcmp: pop 2 cat-2 push 1 int => -3
-    case 0x94: case 0x97: case 0x98: return -3;
-    // conversions
-    case 0x85: return +1;  // i2l
-    case 0x88: return -1;  // l2i
-    case 0x87: return +1;  // i2d
-    case 0x8e: return -1;  // d2i
-    case 0x8d: return +1;  // f2d
-    case 0x90: return -1;  // d2f
-    case 0x8c: return +1;  // f2l
-    case 0x89: return -1;  // l2f
-    case 0x8a: return  0;  // l2d
-    case 0x8f: return  0;  // d2l
-    case 0x86: return  0;  // i2f
-    case 0x8b: return  0;  // f2i
-    default: return 0;     // ineg/lneg/fneg/dneg/i2b/c/s/iinc/goto/return(void)
-  }
-}
 
 // value-type produced/consumed helpers for the operand type stack
-static void vpush(Ctx* x, int t){ x->vspill[x->vn]=-1; x->vt[x->vn++]=t; }
-static void vpush_spilled(Ctx* x, int slot){ x->vspill[x->vn]=slot; x->vt[x->vn++]=TA; }
-static int  vpop(Ctx* x){ return x->vn>0 ? x->vt[--x->vn] : TI; }
+void vpush(Ctx* x, int t){ x->vspill[x->vn]=-1; x->vt[x->vn++]=t; }
+void vpush_spilled(Ctx* x, int slot){ x->vspill[x->vn]=slot; x->vt[x->vn++]=TA; }
+int  vpop(Ctx* x){ return x->vn>0 ? x->vt[--x->vn] : TI; }
 
 // Object ldc (String/Class): resolve the constant-pool entry to its oop via a helper
 // and push it (a produced oop). Shared by raw ldc/ldc_w (0x12/0x13) and fast_aldc/_w
@@ -352,7 +205,7 @@ static void emit_invoke(Ctx* x, Buf* c, const uint8_t* bc, int pc, uint8_t op) {
 //   * emit (c != nullptr): emit the inline wasm and update the value stack; returns 1.
 // Returns 0 if the site is not a recognized intrinsic (fall through to the call path).
 // All operands are primitive -> no oop in the frame -> GC-safe.
-static int wasm_intrinsic(Ctx* x, Buf* c, const uint8_t* bc, int pc, int* argwords, int* rettype) {
+int wasm_intrinsic(Ctx* x, Buf* c, const uint8_t* bc, int pc, int* argwords, int* rettype) {
   ConstantPoolCache* cpc = x->method->constants()->cache();
   if (cpc == nullptr) return 0;
   int idx = Bytes::get_native_u2((address)(bc+pc+1));
@@ -454,7 +307,7 @@ static int wasm_intrinsic(Ctx* x, Buf* c, const uint8_t* bc, int pc, int* argwor
 }
 
 // Emit a straight-line (non-control-flow) opcode. Updates the value-type stack.
-static void emit_op(Ctx* x, Buf* c, const uint8_t* bc, int pc) {
+void emit_op(Ctx* x, Buf* c, const uint8_t* bc, int pc) {
   uint8_t op = bc[pc]; int b = x->base;
   x->vn0 = x->vn;                                            // operand depth at op entry (C4 leftover check)
   if (op==0x59 && x->skip_dup>0) { x->skip_dup--; return; }  // `new`-idiom dup already materialized
@@ -1080,354 +933,5 @@ static void emit_op(Ctx* x, Buf* c, const uint8_t* bc, int pc) {
     default: break;
   }
 }
-bool classify_locals(const uint8_t* bc, int bclen, int maxlocals,
-                            const uint8_t* argtype, const int* argslot, int nargs,
-                            uint8_t* ltype /*out, size maxlocals*/) {
-  int8_t* seen = (int8_t*)malloc(maxlocals?maxlocals:1); memset(seen,-1,maxlocals);
-  for (int i=0;i<nargs;i++) { seen[argslot[i]] = argtype[i]; }
-  for (int pc=0; pc<bclen; ) {
-    int L = instr_len(bc,pc);
-    if (!L) { free(seen); return false; }   // unsupported opcode -> bail (compile_cf would too)
-    uint8_t op = bc[pc]; int idx=-1, t=-1;
-    if (op>=0x3b&&op<=0x3e){ idx=op-0x3b; t=TI; }
-    else if (op==0x36){ idx=bc[pc+1]; t=TI; }
-    else if (op>=0x3f&&op<=0x42){ idx=op-0x3f; t=TJ; }
-    else if (op==0x37){ idx=bc[pc+1]; t=TJ; }
-    else if (op>=0x43&&op<=0x46){ idx=op-0x43; t=TF; }
-    else if (op==0x38){ idx=bc[pc+1]; t=TF; }
-    else if (op>=0x47&&op<=0x4a){ idx=op-0x47; t=TD; }
-    else if (op==0x39){ idx=bc[pc+1]; t=TD; }
-    else if (op>=0x4b&&op<=0x4e){ idx=op-0x4b; t=TA; }   // astore_0..3 (object)
-    else if (op==0x3a){ idx=bc[pc+1]; t=TA; }            // astore (object)
-    else if (op==0xc4){ uint8_t s=bc[pc+1]; int wi=(bc[pc+2]<<8)|bc[pc+3];  // wide store: type the slot
-      if(s==0x36){idx=wi;t=TI;} else if(s==0x37){idx=wi;t=TJ;}
-      else if(s==0x38){idx=wi;t=TF;} else if(s==0x39){idx=wi;t=TD;}
-      else if(s==0x3a){idx=wi;t=TA;} }                          // wide astore (object)
-    if (idx>=0 && idx<maxlocals) {
-      if (seen[idx]>=0 && seen[idx]!=t) { free(seen); return false; }
-      seen[idx]=t;
-    }
-    pc += L;
-  }
-  for (int k=0;k<maxlocals;k++) ltype[k] = wasm_valtype(seen[k]<0 ? TI : seen[k]);
-  free(seen);
-  return true;
-}
-
-// Classify object-local slots: 1 = frame (object arg, re-read from locals[]),
-// 2 = spill (astore'd -> GC-scanned spill array). Bails (false) if an object-arg
-// slot is also astore'd (reassignment mixes frame + spill homes).
-bool analyze_oop_slots(const uint8_t* bc, int bclen, int maxlocals,
-                              const uint8_t* argtype, const int* argslot, int nargs,
-                              uint8_t* slot_kind, int* spill_idx, int* n_spill_out) {
-  for (int k=0;k<maxlocals;k++){ slot_kind[k]=0; spill_idx[k]=-1; }
-  for (int i=0;i<nargs;i++) if (argtype[i]==TA) slot_kind[argslot[i]]=1;
-  for (int pc=0; pc<bclen; ) {
-    int L = instr_len(bc,pc); if (!L) return false;
-    uint8_t op = bc[pc]; int idx=-1;
-    if (op==0x3a) idx=bc[pc+1]; else if (op>=0x4b&&op<=0x4e) idx=op-0x4b;   // astore
-    else if (op==0xc4 && bc[pc+1]==0x3a) idx=(bc[pc+2]<<8)|bc[pc+3];        // wide astore (object)
-    if (idx>=0 && idx<maxlocals) {
-      if (slot_kind[idx]==1) return false;                 // arg reassignment -> bail
-      slot_kind[idx]=2;
-    }
-    pc += L;
-  }
-  int n=0;
-  for (int k=0;k<maxlocals;k++) if (slot_kind[k]==2) spill_idx[k]=n++;
-  *n_spill_out = n;
-  return true;
-}
-
-// Compile a whole method Code to a wasm body via a br-free dispatch loop.
-// Returns 0 on success; else the unsupported opcode (>0), or -1 for an
-// unsupported control-flow/verification shape (bail -> interpreter).
-int compile_cf(Ctx* x, const uint8_t* bc, int bclen, Buf* out) {
-  char* leader = (char*)calloc(bclen+1, 1);
-  leader[0] = 1;
-  x->has_backedge = false; x->uses_oop = false; x->has_call = false;
-  x->produces_oop = false; x->has_alloc = false; x->bail = false;
-  for (int pc = 0; pc < bclen; ) {
-    int L = instr_len(bc, pc);
-    if (!L) { free(leader); return bc[pc]; }
-    uint8_t o = bc[pc];
-    if (o==0x19 || (o>=0x2a && o<=0x2d) || o==Bytecodes::_fast_aload_0
-        || o==0x3a || (o>=0x4b && o<=0x4e)           // astore*
-        || is_getfield(o) || is_putfield(o)
-        || o==0xbe || is_aload_elem(o) || is_astore_elem(o)
-        || (o==0xc4 && (bc[pc+1]==0x19 || bc[pc+1]==0x3a))) x->uses_oop = true;  // wide aload/astore
-    if (o==0x32) x->produces_oop = true;             // aaload -> raw oop element
-    if (o == 0xb8) {                                 // invokestatic
-      x->has_call = true;
-      int iaw, irt;
-      if (wasm_intrinsic(x, nullptr, bc, pc, &iaw, &irt)) {
-        // Inlined intrinsic (Math/Integer/Long): no call, no oops, no bail -- even for a
-        // NATIVE callee like Math.sqrt (which resolve_invoke would otherwise reject).
-      } else {                                        // general JavaCalls path (kind 3)
-        InvokeDesc* d; int nw, rt, aw;
-        int gs = resolve_invoke(x, bc, pc, 0xb8, &d, &nw, &rt, &aw);
-        if (gs == 2) { free(leader); return -2; }      // transient (unresolved) -> retry later
-        if (gs != 0) { free(leader); return -1; }
-        x->uses_oop = true;                            // oop args Handle-ized by invoke_common
-        if (rt == TA) x->produces_oop = true;          // object return -> raw oop
-      }
-    }
-    if (o == 0xb6 || o == 0xb7 || o == 0xb9 || o == 0xe3) {   // invoke v/s/i + vfinal fast (C3)
-      x->has_call = true; x->uses_oop = true;        // receiver oop + call safepoint
-      InvokeDesc* d; int nw, rt, aw;
-      int st = resolve_invoke(x, bc, pc, o, &d, &nw, &rt, &aw);
-      if (st == 2) { free(leader); return -2; }
-      if (st != 0) { free(leader); return -1; }
-      if (rt == TA) x->produces_oop = true;          // object return -> raw oop
-    }
-    if (o == 0xba) {                                 // invokedynamic (C3.3): string concat / lambda
-      x->has_call = true; x->uses_oop = true;
-      IndyDesc* d; int nw, rt, aw;
-      int st = resolve_indy(x, bc, pc, &d, &nw, &rt, &aw);
-      if (st == 2) { free(leader); return -2; }      // bootstrap not resolved yet -> retry
-      if (st != 0) { free(leader); return -1; }
-      if (rt == TA) x->produces_oop = true;          // object return (e.g. String) -> raw oop
-    }
-    if (o == 0xb2 || o == 0xb3) {                    // getstatic/putstatic: primitive only
-      intptr_t k; int off, tc, wt;
-      int st = resolve_static_field(x, bc, pc, o==0xb3, &k, &off, &tc, &wt);
-      if (st == 2) { free(leader); return -2; }
-      if (st != 0) { free(leader); return -1; }
-    }
-    if (is_getfield(o) || is_putfield(o)) {          // get/putfield (prim or object field)
-      int off, tc, wt;
-      int st = resolve_instance_field(x, bc, pc, is_putfield(o), &off, &tc, &wt);
-      if (st == 2) { free(leader); return -2; }
-      if (st != 0) { free(leader); return -1; }
-      if (is_getfield(o) && wt == TA) x->produces_oop = true;   // object getfield -> raw oop
-    }
-    if (o==Bytecodes::_fast_iaccess_0 || o==Bytecodes::_fast_aaccess_0 ||
-        o==Bytecodes::_fast_faccess_0) {             // fused this.field: resolve (index at pc+2)
-      x->uses_oop = true;                            // reads `this` (frame oop, slot 0)
-      int off, tc, wt;
-      int st = resolve_instance_field(x, bc, pc, false, &off, &tc, &wt, 2);
-      if (st == 2) { free(leader); return -2; }
-      if (st != 0) { free(leader); return -1; }
-      if (wt == TA) x->produces_oop = true;          // object field (aaccess_0) -> raw oop
-    }
-    if (o==0xbb) {                                   // new: class resolved + canonical dup idiom
-      if (resolve_klass(x, bc, pc) == 0) { free(leader); return -2; }
-      Klass* k = (Klass*)resolve_klass(x, bc, pc);
-      if (!k->is_instance_klass()) { free(leader); return -1; }   // array 'new' is newarray/anewarray
-      int nx = pc + 3;                               // require `new; dup` (javac's object-init idiom)
-      if (nx >= bclen || bc[nx] != 0x59) { free(leader); return -1; }
-      x->has_alloc = true; x->uses_oop = true;
-    }
-    if (o==0xc1) {                                   // instanceof: class must be resolved
-      if (resolve_klass(x, bc, pc) == 0) { free(leader); return -2; }
-    }
-    if (o==0xc0) {                                   // checkcast: class resolved; produces a raw oop
-      if (resolve_klass(x, bc, pc) == 0) { free(leader); return -2; }
-      x->produces_oop = true; x->uses_oop = true;    // CCE early-return -> handler-free
-    }
-    if (o==0xbc || o==0xbd) {                        // newarray/anewarray: allocation
-      x->has_alloc = true; x->uses_oop = true;       // NASE/OOM early-return -> handler-free
-      if (o==0xbd && resolve_klass(x, bc, pc) == 0) { free(leader); return -2; }
-      int nx = pc + L; uint8_t no = (nx < bclen) ? bc[nx] : 0;  // require astore right after ->
-      if (!(no==0x3a || (no>=0x4b && no<=0x4e))) { free(leader); return -1; }  // new oop -> spill slot
-    }
-    if (o==0xc5) {                                   // multianewarray, 1..4 dims
-      if (bc[pc+3] < 1 || bc[pc+3] > 4) { free(leader); return -1; }  // >4D bails (helper takes 4)
-      if (resolve_klass(x, bc, pc) == 0) { free(leader); return -2; }
-      x->has_alloc = true; x->uses_oop = true;
-      int nx = pc + L; uint8_t no = (nx < bclen) ? bc[nx] : 0;   // require astore right after
-      if (!(no==0x3a || (no>=0x4b && no<=0x4e))) { free(leader); return -1; }
-    }
-    if (o==0xc2 || o==0xc3) {                         // monitorenter/monitorexit (C4.2)
-      x->has_alloc = true; x->uses_oop = true;        // enter() blocks -> a safepoint (gate produced oops)
-    }
-    if (o==0x14) {                                   // ldc2_w: long/double only
-      int idx = (bc[pc+1]<<8)|bc[pc+2];
-      constantTag t = x->cp->tag_at(idx);
-      if (!(t.is_long() || t.is_double())) { free(leader); return -1; }
-    }
-    // ldc/ldc_w (raw, 0x12/0x13, pool index) and fast_aldc/_w (0xe6/0xe7, ref index):
-    // numeric stays numeric; a String/Class constant is a produced oop resolved by the
-    // helper. javac leaves object ldc raw OR quickens it to fast_aldc -- handle both.
-    if (o==0x12 || o==0x13 || o==0xe6 || o==0xe7) {
-      int cpi;
-      if (o==0x12) cpi = bc[pc+1];
-      else if (o==0x13) cpi = (bc[pc+1]<<8)|bc[pc+2];
-      else cpi = x->cp->object_to_cp_index((o==0xe6) ? bc[pc+1] : (bc[pc+1]|(bc[pc+2]<<8)));
-      constantTag t = x->cp->tag_at(cpi);
-      if (o==0xe6 || o==0xe7 || (!t.is_int() && !t.is_float())) {   // fast_aldc is always object
-        if (t.is_string() || t.is_klass() || t.is_unresolved_klass()) {
-          x->produces_oop = true; x->uses_oop = true; // resolved to an oop by the helper
-        } else { free(leader); return -1; }          // MethodHandle/MethodType/dynamic -> bail
-      }
-    }
-    if (is_switch(bc[pc])) {
-      int p = switch_pad(pc), base = pc+1+p, ntgt, toff;
-      int def = pc + s4be(bc, base);
-      if (def < 0 || def > bclen) { free(leader); return -1; }
-      if (def <= pc) x->has_backedge = true; leader[def] = 1;
-      if (bc[pc]==0xaa) { int low=s4be(bc,base+4), high=s4be(bc,base+8); ntgt=high-low+1; toff=base+12; }
-      else              { ntgt=s4be(bc,base+4); toff=base+8; }
-      for (int j=0;j<ntgt;j++) {
-        int t = pc + s4be(bc, toff + (bc[pc]==0xaa ? j*4 : j*8+4));
-        if (t < 0 || t > bclen) { free(leader); return -1; }
-        if (t <= pc) x->has_backedge = true; leader[t] = 1;
-      }
-      if (pc + L <= bclen) leader[pc + L] = 1;
-    } else if (is_branch(bc[pc])) {
-      int tgt = branch_target(bc, pc);
-      if (tgt < 0 || tgt > bclen) { free(leader); return -1; }
-      if (tgt <= pc) x->has_backedge = true;         // loop -> needs safepoint poll
-      leader[tgt] = 1; if (pc + L <= bclen) leader[pc + L] = 1;
-    } else if (is_return(bc[pc])) {
-      if (pc + L < bclen) leader[pc + L] = 1;
-    }
-    pc += L;
-  }
-  // C4: exception handlers. Mark each handler_pc as a block leader and require its
-  // first op to immediately consume the exception oop (astore/pop -> no safepoint
-  // between take_exception and the store, so the oop is GC-safe). We dispatch to
-  // handlers in-JIT; on no match we propagate to the caller.
-  x->has_handlers = false;
-  { int n = x->method->exception_table_length();
-    ExceptionTableElement* et = x->method->exception_table_start();
-    for (int i=0;i<n;i++) {
-      int H = et[i].handler_pc;
-      if (H < 0 || H >= bclen) { free(leader); return -1; }
-      leader[H] = 1;
-      uint8_t fo = bc[H];
-      if (!(fo==0x3a || (fo>=0x4b && fo<=0x4e) || fo==0x57)) { free(leader); return -1; }
-    }
-    if (n > 0) x->has_handlers = true;
-  }
-  // A produced (raw, non-frame) oop lives only on the operand stack. The empty-
-  // stack-at-boundary rule keeps it from crossing a back-edge, and the invoke emit
-  // rejects a raw oop stranded *below* a call's args (while oop args/receivers are
-  // Handle-ized by wasmjit_invoke_common). So a produced oop crossing a call is
-  // handled locally — only an allocation safepoint (new/newarray/multianewarray),
-  // which has no such per-op check, still needs the whole-method bail.
-  if (x->produces_oop && x->has_alloc) { free(leader); return -1; }
-  // Operand stack must be empty (in JVM words) at every block boundary -- except a
-  // handler entry, which begins with the exception oop (depth 1).
-  { char* is_h = (char*)calloc(bclen+1,1);
-    int hn = x->method->exception_table_length();
-    ExceptionTableElement* het = x->method->exception_table_start();
-    for (int i=0;i<hn;i++) is_h[het[i].handler_pc] = 1;
-    int depth = 0;
-    for (int pc = 0; pc < bclen; ) {
-      if (pc != 0 && leader[pc]) {
-        if (is_h[pc]) depth = 1;                             // exception entry
-        else if (depth != 0) { free(is_h); free(leader); return -1; }
-      }
-      uint8_t op = bc[pc];
-      if (op == 0xbf) {                                      // athrow: pops exception, then unwinds
-        depth = 0;
-      } else if (is_branch(op) || is_switch(op)) {
-        depth += stack_delta(x,bc,pc);
-        if (depth != 0 || depth < 0) { free(is_h); free(leader); return -1; }
-      } else if (is_return(op)) {
-        depth = 0;
-      } else {
-        depth += stack_delta(x,bc,pc);
-        if (depth < 0) { free(is_h); free(leader); return -1; }
-      }
-      pc += instr_len(bc, pc);
-    }
-    free(is_h);
-  }
-
-  int nblocks = 0;
-  int* blk_of = (int*)malloc(sizeof(int)*(bclen+1));
-  for (int pc = 0; pc <= bclen; pc++) blk_of[pc] = -1;
-  for (int pc = 0; pc <= bclen; pc++) if (leader[pc]) blk_of[pc] = nblocks++;
-
-  int* vtbuf = (int*)malloc(sizeof(int)*(bclen+8));
-  int* vspillbuf = (int*)malloc(sizeof(int)*(bclen+8));
-  x->vt = vtbuf; x->vspill = vspillbuf; x->skip_dup = 0; x->blk_of = blk_of;
-  // set of handler-start pcs (their blocks begin with the exception oop pushed)
-  char* is_hstart = (char*)calloc(bclen+1,1);
-  { int hn = x->method->exception_table_length();
-    ExceptionTableElement* het = x->method->exception_table_start();
-    for (int i=0;i<hn;i++) is_hstart[het[i].handler_pc] = 1; }
-
-  Buf body = {};
-  bput(&body, 0x03); bput(&body, 0x40);          // loop (void)
-  if (x->has_backedge) { bput(&body,0x10); uleb(&body,Imp::POLL); }  // call $poll (import 0) per iteration
-  int cur = 0;
-  for (int pc = 0; pc < bclen; ) {
-    if (!leader[pc]) { pc += instr_len(bc, pc); continue; }
-    get_local(&body,x->BB); bput(&body,0x41); sleb(&body,cur); bput(&body,0x46);
-    bput(&body,0x04); bput(&body,0x40);          // if (i32.eq $bb cur)
-    int blkend = pc; do { blkend += instr_len(bc, blkend); } while (blkend < bclen && !leader[blkend]);
-    int lastpc = pc; while (lastpc + instr_len(bc,lastpc) < blkend) lastpc += instr_len(bc,lastpc);
-    x->vn = 0;
-    if (is_hstart[pc]) {                              // handler entry: take the exception oop
-      bput(&body,0x10); uleb(&body,Imp::TAKE_EXCEPTION);              // call $take_exception -> i32 oop
-      vpush(x, TA);                                  // (first op is astore/pop -> consumed immediately)
-    }
-    for (int p = pc; p < blkend; ) {
-      uint8_t op = bc[p]; int L = instr_len(bc, p);
-      if (is_switch(op)) {
-        // set $bb from the index via a linear compare chain, then br to loop top
-        int pd = switch_pad(p), base = p+1+pd, ntgt, toff, low=0;
-        set_local(&body, x->TMPI);                   // index
-        bput(&body,0x41); sleb(&body, blk_of[p + s4be(bc,base)]);  // default
-        set_local(&body, x->BB);
-        if (op==0xaa) { low=s4be(bc,base+4); int high=s4be(bc,base+8); ntgt=high-low+1; toff=base+12; }
-        else          { ntgt=s4be(bc,base+4); toff=base+8; }
-        for (int j=0;j<ntgt;j++) {
-          int matchv = (op==0xaa) ? low+j : s4be(bc, toff+j*8);
-          int tpc = p + s4be(bc, toff + (op==0xaa ? j*4 : j*8+4));
-          get_local(&body, x->TMPI); bput(&body,0x41); sleb(&body,matchv); bput(&body,0x46); // idx==match
-          bput(&body,0x04); bput(&body,0x40);
-            bput(&body,0x41); sleb(&body, blk_of[tpc]); set_local(&body,x->BB);
-          bput(&body,0x0b);
-        }
-        bput(&body,0x0c); uleb(&body,1);             // br loop
-      } else if (is_branch(op)) {
-        int tgt = blk_of[branch_target(bc, p)], fall = blk_of[p + L];
-        if (op == 0xa7 || op == 0xc8) { bput(&body,0x41); sleb(&body,tgt); }
-        else { emit_cond(&body, op);
-               set_local(&body,x->TMPI);
-               bput(&body,0x41); sleb(&body,tgt); bput(&body,0x41); sleb(&body,fall);
-               get_local(&body,x->TMPI); bput(&body,0x1b); }
-        set_local(&body,x->BB); bput(&body,0x0c); uleb(&body,1);
-      } else if (is_return(op)) {
-        emit_sync_unlock(x, &body);                // sync method: unlock `this` before returning (result stays on stack)
-        if (x->n_spill > 0) {                      // pop the oop-spill frame (result stays below n)
-          bput(&body,0x41); sleb(&body,x->n_spill); bput(&body,0x10); uleb(&body,Imp::OOP_LEAVE);
-        }
-        switch (op) {                              // widen result to i64 to match fn type
-          case 0xac: bput(&body,0xac); break;      // ireturn: i64.extend_i32_s
-          case 0xb0: bput(&body,0xad); break;      // areturn: i64.extend_i32_u (oop addr)
-          case 0xad: break;                        // lreturn: already i64
-          case 0xae: bput(&body,0xbc); bput(&body,0xad); break; // freturn: reinterpret + extend_u
-          case 0xaf: bput(&body,0xbd); break;      // dreturn: i64.reinterpret_f64
-          case 0xb1: bput(&body,0x42); sleb(&body,0); break;    // return void: push 0
-        }
-        bput(&body,0x0f);
-      } else {
-        emit_op(x, &body, bc, p);
-      }
-      p += L;
-    }
-    if (!is_branch(bc[lastpc]) && !is_return(bc[lastpc]) && !is_switch(bc[lastpc])) {
-      bput(&body,0x41); sleb(&body, blk_of[blkend]);
-      set_local(&body,x->BB); bput(&body,0x0c); uleb(&body,1);
-    }
-    bput(&body,0x0b);                            // end if
-    cur++; pc = blkend;
-  }
-  bput(&body,0x0b); bput(&body,0x00);            // end loop; unreachable
-  free(is_hstart);
-  if (x->bail) { free(body.p); free(leader); free(blk_of); free(vtbuf); free(vspillbuf); return -1; }
-  *out = body; free(leader); free(vtbuf); free(vspillbuf);
-  x->osr_blk = blk_of;   // OSR: keep the bci->block map (ownership passes to do_compile)
-  return 0;
-}
-
-// Emit the module: type (i64 x nargs)->i64, one function, export "f".
-// argtype/argslot describe args; rettype the return; ltype the slot types.
-
 } // namespace wasm
 #endif // __EMSCRIPTEN__

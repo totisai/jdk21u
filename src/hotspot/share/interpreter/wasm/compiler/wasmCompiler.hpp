@@ -1,8 +1,11 @@
 /*
- * WasmJit — the bytecode -> WebAssembly compiler core: operand-stack modelling,
- * per-opcode translation (emit_op), basic-block control-flow assembly (compile_cf),
- * and the local/oop analysis passes. Entry points below are driven by the core
- * driver (do_compile). See interpreter/wasm/wasmJit.hpp.
+ * WasmJit — public interface of the bytecode -> WebAssembly compiler, driven by the
+ * core driver (do_compile). The implementation is split by concern across:
+ *   wasmEmit.cpp      per-bytecode translation (emit_op) + operand value-type stack
+ *   wasmStackmap.cpp  operand-stack modelling (op_consumed, stack_delta)
+ *   wasmAnalysis.cpp  local/oop analysis passes + control-flow assembly (below)
+ * Cross-unit calls between those go through wasmCompilerInternal.hpp.
+ * See interpreter/wasm/wasmJit.hpp.
  */
 #ifndef SHARE_INTERPRETER_WASM_COMPILER_WASMCOMPILER_HPP
 #define SHARE_INTERPRETER_WASM_COMPILER_WASMCOMPILER_HPP

@@ -26,10 +26,15 @@ if (typeof window === 'undefined') {
         const r = event.request;
         if (r.cache === 'only-if-cached' && r.mode !== 'same-origin') return;
 
-        // Only rewrite the document navigation to carry COOP/COEP; that alone makes the
-        // page cross-origin isolated. Proxying same-origin subresources isn't needed and
-        // breaks the large runtime download in some browsers ("Load failed").
-        if (r.mode !== 'navigate') return;
+        // Rewrite the document navigation AND worker/script subresources to carry
+        // COOP/COEP. The document alone makes the page cross-origin isolated, but an
+        // emscripten pthread worker must itself be served with COEP or Chrome blocks it.
+        // Skip everything else — re-serving the large runtime download (~60 MB .data.gz)
+        // through the worker fails in some browsers ("Load failed"), and same-origin
+        // fetches don't need CORP anyway.
+        const proxied = r.mode === 'navigate' ||
+            r.destination === 'worker' || r.destination === 'sharedworker' || r.destination === 'script';
+        if (!proxied) return;
 
         const request = (coepCredentialless && r.mode === 'no-cors')
             ? new Request(r, { credentials: 'omit' })

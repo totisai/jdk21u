@@ -89,8 +89,8 @@ Module.expectedDataFileDownloads++;
   } else if (typeof process === "undefined" && typeof location !== "undefined") {
    PACKAGE_PATH = encodeURIComponent(location.pathname.toString().substring(0, location.pathname.toString().lastIndexOf("/")) + "/");
   }
-  var PACKAGE_NAME = "web/jvm-base-emunet.data";
-  var REMOTE_PACKAGE_BASE = "jvm-base-emunet.data";
+  var PACKAGE_NAME = "web/jvm-tinys3.data";
+  var REMOTE_PACKAGE_BASE = "jvm-tinys3.data";
   if (typeof Module["locateFilePackage"] === "function" && !Module["locateFile"]) {
    Module["locateFile"] = Module["locateFilePackage"];
    err("warning: you defined Module.locateFilePackage, that has been renamed to Module.locateFile (using your locateFilePackage for now)");
@@ -1246,9 +1246,9 @@ Module.expectedDataFileDownloads++;
     for (var i = 0; i < files.length; ++i) {
      DataRequest.prototype.requests[files[i].filename].onload();
     }
-    Module["removeRunDependency"]("datafile_web/jvm-base-emunet.data");
+    Module["removeRunDependency"]("datafile_web/jvm-tinys3.data");
    }
-   Module["addRunDependency"]("datafile_web/jvm-base-emunet.data");
+   Module["addRunDependency"]("datafile_web/jvm-tinys3.data");
    if (!Module.preloadResults) Module.preloadResults = {};
    Module.preloadResults[PACKAGE_NAME] = {
     fromCache: false
@@ -104583,7 +104583,7 @@ function createExportWrapper(name) {
 
 var wasmBinaryFile;
 
-wasmBinaryFile = "jvm-base-emunet.wasm";
+wasmBinaryFile = "jvm-tinys3.wasm";
 
 if (!isDataURI(wasmBinaryFile)) {
  wasmBinaryFile = locateFile(wasmBinaryFile);
@@ -107956,7 +107956,7 @@ var PThread = {
  },
  allocateUnusedWorker() {
   var worker;
-  var pthreadMainJs = locateFile("jvm-base-emunet.worker.js");
+  var pthreadMainJs = locateFile("jvm-tinys3.worker.js");
   worker = new Worker(pthreadMainJs);
   PThread.unusedWorkers.push(worker);
  },

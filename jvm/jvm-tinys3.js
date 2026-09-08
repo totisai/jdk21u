@@ -104321,7 +104321,7 @@ assert(!Module["STACK_SIZE"], "STACK_SIZE can no longer be set at runtime.  Use 
 
 assert(typeof Int32Array != "undefined" && typeof Float64Array !== "undefined" && Int32Array.prototype.subarray != undefined && Int32Array.prototype.set != undefined, "JS engine does not provide full typed array support");
 
-var INITIAL_MEMORY = Module["INITIAL_MEMORY"] || 536870912;
+var INITIAL_MEMORY = Module["INITIAL_MEMORY"] || 268435456;
 
 legacyModuleProp("INITIAL_MEMORY", "INITIAL_MEMORY");
 

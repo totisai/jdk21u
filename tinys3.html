@@ -195,7 +195,13 @@ async function boot() {
       M.FS.writeFile('/work/classpath', '/app/lib/tinys3-all.jar');
       M.FS.writeFile('/work/addmods', 'ALL-SYSTEM');
       M.FS.writeFile('/work/args', ['server', '/work/data'].join('\n'));
-      M.FS.writeFile('/work/vmopts', ['-Dtinys3.fsync=none',
+      M.FS.writeFile('/work/vmopts', [
+        // Boot tiny: without these the JVM self-sizes to the wasm heap (~1.3 GB) and
+        // Netty pre-allocates fat pooled arenas + cores×2 event-loop threads.
+        '-Xmx128m', '-Xms16m', '-XX:MaxMetaspaceSize=160m', '-Xss512k',
+        '-XX:MaxDirectMemorySize=32m', '-XX:+UseSerialGC',
+        '-Dio.netty.allocator.type=unpooled', '-Dio.netty.eventLoopThreads=2',
+        '-Dtinys3.fsync=none',
         '--add-opens=java.base/java.lang=ALL-UNNAMED', '--add-opens=java.base/java.io=ALL-UNNAMED',
         '--add-opens=java.base/java.nio=ALL-UNNAMED', '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED'].join('\n'));
       M.ENV = M.ENV || {}; M.ENV.TINYS3_ROOT_USER = 'admin'; M.ENV.TINYS3_ROOT_PASSWORD = 'password';

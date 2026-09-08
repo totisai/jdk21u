@@ -1,10 +1,7 @@
-// emunetS3Handler.js — an AWS SDK v3 HttpHandler that transports over the emunet
-// loopback instead of the network. Plug it into @aws-sdk/client-s3 so the browser
-// (or Node) talks to TinyS3 running inside the wasm JVM: the SDK does all the
-// SigV4 signing, XML, and multipart; we just carry the bytes in-process.
+// emunetS3Handler.js — an AWS SDK v3 HttpHandler that transports over emunet instead
+// of the network, so @aws-sdk/client-s3 talks to TinyS3 inside the wasm JVM (the SDK
+// still does the SigV4/XML/multipart work).
 //
-//   import { S3Client } from '@aws-sdk/client-s3';
-//   import { emunetHttpHandler } from './emunetS3Handler.js';
 //   const s3 = new S3Client({
 //     endpoint: 'http://127.0.0.1:8000', region: 'us-east-1', forcePathStyle: true,
 //     credentials: { accessKeyId: 'admin', secretAccessKey: 'password' },
@@ -47,8 +44,7 @@ async function toBytes(body) {
   throw new Error('emunetS3Handler: unsupported request body type');
 }
 
-// Node's AWS-SDK stream collector requires a Readable; the browser's accepts a
-// Uint8Array. Return the right shape for the environment.
+// Node's SDK stream collector wants a Readable; the browser's accepts a Uint8Array.
 let NodeReadable = null;
 const isNode = typeof process !== 'undefined' && !!(process.versions && process.versions.node);
 async function toResponseBody(bytes) {
@@ -82,8 +78,6 @@ export function emunetHttpHandler(mod) {
       const bodyBytes = await toBytes(request.body);
       // request.headers already carries the signed host + x-amz-* + authorization.
       const res = await emuSend(mod, { port, method: request.method, path, headers: request.headers, body: bodyBytes });
-      // The SDK deserializers read statusCode/headers/body. The browser stream
-      // collector accepts a Uint8Array directly; Node's wants a Readable, so wrap it.
       return { response: { statusCode: res.status, headers: res.headers, body: await toResponseBody(res.body) } };
     },
     // Some SDK middlewares probe these; harmless no-ops.

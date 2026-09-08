@@ -1,16 +1,7 @@
-// emunet.js — browser (and node) client for the in-sandbox loopback TCP stack.
-//
-// The wasm JVM exports (via EMSCRIPTEN_KEEPALIVE, see framework/net/emunet.c):
-//   emunet_connect(ip, port) -> fd        open a loopback connection to a bound port
-//   emunet_send_buf(fd, len)  -> n         send `len` bytes from the shared scratch buffer
-//   emunet_recv_buf(fd)       -> n|0|-1    recv into scratch: n>0 bytes, 0 EOF, -1 empty
-//   emunet_readable(fd)       -> n|0|-2|-1 bytes ready / none / peer-closed / bad fd
-//   emunet_close(fd)          -> 0
-//   emunet_buf()/emunet_buf_size()         the shared scratch buffer (module heap)
-//
-// This makes the browser a genuine TCP client of a server running INSIDE the JVM —
-// no network, no relay. Bytes are copied through the shared scratch buffer so we
-// never depend on _malloc being exported.
+// emunet.js — browser/node client for the in-sandbox loopback TCP stack.
+// Talks to the emunet_* exports from framework/net/emunet.c: connect to a port a
+// server inside the JVM has bound, then send/recv bytes through the shared scratch
+// buffer (avoids depending on an exported _malloc). No network, no relay.
 
 export class EmuSocket {
   constructor(mod, fd) { this.mod = mod; this.fd = fd; this._buf = mod._emunet_buf(); this._cap = mod._emunet_buf_size(); }
@@ -46,8 +37,7 @@ export class EmuSocket {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Open a loopback connection to 127.0.0.1:<port> inside the JVM.
-// Retries briefly so a just-booted server has time to bind.
+// Open a loopback connection to 127.0.0.1:<port>, retrying while the server binds.
 export async function emuConnect(mod, port, { retries = 200, wait = 25 } = {}) {
   for (let i = 0; i < retries; i++) {
     const fd = mod._emunet_connect(0x7f000001, port);
@@ -57,10 +47,9 @@ export async function emuConnect(mod, port, { retries = 200, wait = 25 } = {}) {
   throw new Error(`emuConnect: nothing listening on port ${port}`);
 }
 
-// Read a full response, concatenating all bytes. Terminates on EOF (server closed)
-// or, on a kept-alive connection that stays open, a short idle after the last byte.
-// Two-phase idle: patient for the first byte (the server may be slow to respond on
-// the interpreter), then a short trailing idle once data has started flowing.
+// Read a full response. Ends on EOF, or a short idle after data starts flowing on a
+// kept-alive connection. Two-phase idle: patient for the first byte (the interpreter
+// can be slow to respond), then a short trailing idle once bytes arrive.
 export async function readToEnd(sock, { firstByteMax = 20000, trailingIdle = 300 } = {}) {
   const chunks = []; let idle = 0; let started = false;
   for (;;) {

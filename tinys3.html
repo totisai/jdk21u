@@ -53,10 +53,6 @@
   .toolbar .crumb{font-size:14px;color:var(--ink)}
   .toolbar .crumb b{color:var(--accent)}
   .toolbar .sp{flex:1}
-  .viewtoggle{display:inline-flex;border:1px solid var(--edge);border-radius:7px;overflow:hidden}
-  .vt{background:transparent;border:none;color:var(--dim);font-size:12.5px;padding:6px 12px;cursor:pointer}
-  .vt.active{background:var(--panel);color:var(--accent)}
-  #nativeconsole{flex:1;min-height:0;width:100%;border:0;background:#fff}
   .btn{background:var(--accent);color:#111;border:none;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer;font-size:13px}
   .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--edge)}
   .btn:disabled{opacity:.5;cursor:default}
@@ -123,7 +119,6 @@
     </div>
     <div class="main">
       <div class="toolbar">
-        <span class="viewtoggle"><button class="vt active" id="vt-files" data-v="files">Files</button><button class="vt" id="vt-console" data-v="console">TinyS3 Console</button></span>
         <span class="crumb" id="crumb">Select a bucket</span>
         <span class="sp"></span>
         <button class="btn ghost" id="refresh">Refresh</button>
@@ -132,7 +127,6 @@
       </div>
       <div class="drop" id="drop" hidden>Drop files here to upload to <b id="dropbkt"></b></div>
       <div class="objects" id="objects"><div class="empty">Booting TinyS3…</div></div>
-      <iframe id="nativeconsole" title="TinyS3 web console" hidden></iframe>
     </div>
   </div>
 </div>
@@ -218,12 +212,6 @@ async function boot() {
     credentials: { accessKeyId: 'admin', secretAccessKey: 'password' },
     requestHandler: emunetHttpHandler(mod),
   });
-  // Transport bridge for the native-console iframe: forward any request (assets +
-  // S3 API) to TinyS3 on :8000 over emunet. Returns bytes + status + headers.
-  window.__emuS3Fetch = async ({ path, method, headers, body }) => {
-    const r = await emuSend(mod, { port: 8000, method, path, headers, body });
-    return { status: r.status, statusText: r.statusText, headers: r.headers, body: r.body };
-  };
 }
 
 // ---- S3 console UI -------------------------------------------------------------
@@ -305,57 +293,6 @@ const drop = $('drop');
 ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
 ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
 drop.addEventListener('drop', e => { if (e.dataTransfer.files.length) upload(e.dataTransfer.files); });
-
-// ---- native TinyS3 web console (real /console SPA in a same-origin iframe) ------
-// The console is a single-chunk Vite bundle with absolute /console/ asset refs. We
-// fetch its html/js/css over emunet, inline them via blob URLs, and inject a shim
-// that overrides the iframe's fetch so every request (assets already inlined, plus
-// the SPA's S3 API calls) is proxied to TinyS3 on :8000 through the parent.
-const CONSOLE_SHIM = `(function(){
-  const P = window.parent, realFetch = window.fetch.bind(window);
-  window.fetch = async function(input, init){
-    const req = input instanceof Request ? input : new Request(input, init);
-    const u = new URL(req.url, location.href);
-    if (u.protocol === 'blob:' || u.protocol === 'data:') return realFetch(input, init);
-    const method = req.method || 'GET';
-    const headers = {}; req.headers.forEach((v,k)=>headers[k]=v);
-    const body = (method==='GET'||method==='HEAD') ? null : new Uint8Array(await req.clone().arrayBuffer());
-    const res = await P.__emuS3Fetch({ path: u.pathname + u.search, method, headers, body });
-    const h = new Headers(); for (const k in res.headers) { try { h.set(k, res.headers[k]); } catch(e){} }
-    return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
-  };
-})();`;
-
-let consoleLoaded = false;
-async function openNativeConsole() {
-  if (consoleLoaded) return; consoleLoaded = true;
-  const dec = new TextDecoder();
-  const idx = await emuSend(mod, { port: 8000, method: 'GET', path: '/console/' });
-  let html = dec.decode(idx.body);
-  const urls = [...new Set(html.match(/\/console\/assets\/[A-Za-z0-9._-]+\.(?:js|css)/g) || [])];
-  for (const p of urls) {
-    const r = await emuSend(mod, { port: 8000, method: 'GET', path: p });
-    const type = p.endsWith('.css') ? 'text/css' : 'text/javascript';
-    const url = URL.createObjectURL(new Blob([r.body], { type }));
-    html = html.split('"' + p + '"').join('"' + url + '"');
-  }
-  html = html.replace(/<head([^>]*)>/i, (m) => m + '<script>' + CONSOLE_SHIM + '<\/script>');
-  $('nativeconsole').srcdoc = html;
-}
-
-function switchView(v) {
-  const files = v === 'files';
-  $('vt-files').classList.toggle('active', files);
-  $('vt-console').classList.toggle('active', !files);
-  $('objects').hidden = !files;
-  $('drop').hidden = !files || !currentBucket;
-  $('nativeconsole').hidden = files;
-  for (const id of ['refresh', 'uploadbtn', 'crumb']) $(id).style.visibility = files ? '' : 'hidden';
-  $('urlpath').textContent = files ? (currentBucket ? '/console/buckets/' + currentBucket : '/console') : '/console';
-  if (!files) openNativeConsole().catch(e => vlog('console load error: ' + (e && e.message || e), 'err'));
-}
-$('vt-files').onclick = () => switchView('files');
-$('vt-console').onclick = () => switchView('console');
 
 // ---- go ------------------------------------------------------------------------
 (async () => {

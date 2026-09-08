@@ -73,6 +73,18 @@ if [ "$WANT_AWT" = 1 ]; then
   fi
 fi
 
+# java.management native (JMX/MXBeans) for non-AWT tiers that need it: servlet
+# containers (Tomcat/Jetty) register MBeans during startup, so System.loadLibrary
+# ("management") must resolve. Link the same static libmanagement objects.
+if [ "$WANT_EMUNET" = 1 ] && [ "$WANT_AWT" != 1 ]; then
+  if ls support/native/java.management/libmanagement/static/*.o >/dev/null 2>&1; then
+    EXTRA_OBJS="$EXTRA_OBJS support/native/java.management/libmanagement/static/*.o"
+  fi
+  if ls support/native/jdk.management/libmanagement_ext/static/*.o >/dev/null 2>&1; then
+    EXTRA_OBJS="$EXTRA_OBJS support/native/jdk.management/libmanagement_ext/static/*.o"
+  fi
+fi
+
 # ---- GL: compile the translator + generate LWJGL dispatch ---------------------
 if [ "$WANT_GL" = 1 ]; then
   emcc -c -O2 "$JDK/wasm-jvm/native/gl/wgl.c"     -I jdk/include -I jdk/include/emscripten -o "$BIN/wgl.o"     || { echo WGL_FAIL; exit 1; }
@@ -101,6 +113,12 @@ if [ "$WANT_GL" = 1 ] || [ "$WANT_NET" = 1 ] || [ "$WANT_EMUNET" = 1 ]; then
   emcc -c -O2 $NSFLAG "$JDK/wasm-jvm/native/gl/netstub.c" -I jdk/include -I jdk/include/emscripten -o "$BIN/netstub.o" || { echo NETSTUB_FAIL; exit 1; }
   EXTRA_OBJS="$EXTRA_OBJS $BIN/netstub.o"
 fi
+# jdkstubs: benign fallbacks for JDK/libc natives the port doesn't implement
+# (ProcessHandle os_*, xattr, futimes, sigsuspend, wcsftime). Linked into every tier
+# so real frameworks (e.g. Spring Boot reading the PID) don't hit a "missing
+# function" abort. Only fills symbols confirmed absent from the build.
+emcc -c -O2 "$JDK/wasm-jvm/framework/kernel/jdkstubs.c" -I jdk/include -I jdk/include/emscripten -o "$BIN/jdkstubs.o" || { echo JDKSTUBS_FAIL; exit 1; }
+EXTRA_OBJS="$EXTRA_OBJS $BIN/jdkstubs.o"
 if [ "$WANT_NET" = 1 ]; then
   emcc -c -O2 -pthread -matomics -mbulk-memory "$JDK/wasm-jvm/framework/kernel/wsps.c" -I jdk/include -I jdk/include/emscripten -o "$BIN/wsps.o" || { echo WSPS_FAIL; exit 1; }
   EXTRA_OBJS="$EXTRA_OBJS $BIN/wsps.o"

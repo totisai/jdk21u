@@ -113,13 +113,34 @@ function parseHttp(bytes) {
     const idx = lines[i].indexOf(':');
     if (idx > 0) headers[lines[i].slice(0, idx).trim().toLowerCase()] = lines[i].slice(idx + 1).trim();
   }
+  const decoded = /chunked/i.test(headers['transfer-encoding'] || '') ? dechunk(body) : body;
   return {
     status: m ? parseInt(m[1], 10) : 0,
     statusText: m ? m[2] : '',
     headers,
-    body,
-    text: () => dec.decode(body),
+    body: decoded,
+    text: () => dec.decode(decoded),
   };
+}
+
+// Decode HTTP/1.1 chunked transfer-encoding into a single body buffer.
+function dechunk(b) {
+  const out = [];
+  let i = 0;
+  while (i < b.length) {
+    let j = i;
+    while (j + 1 < b.length && !(b[j] === 13 && b[j + 1] === 10)) j++;   // find CRLF
+    const sizeLine = dec.decode(b.subarray(i, j)).trim();
+    const size = parseInt(sizeLine.split(';')[0], 16);
+    if (!Number.isFinite(size) || size === 0) break;                    // last chunk
+    const start = j + 2;
+    out.push(b.subarray(start, start + size));
+    i = start + size + 2;                                               // skip chunk + CRLF
+  }
+  let total = 0; for (const c of out) total += c.length;
+  const res = new Uint8Array(total);
+  let off = 0; for (const c of out) { res.set(c, off); off += c.length; }
+  return res;
 }
 
 function indexOfCRLFCRLF(b) {

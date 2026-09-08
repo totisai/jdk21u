@@ -1,0 +1,2 @@
+{ "name": "wasm-jvm-net-relay", "private": true, "type": "module",
+  "dependencies": { "ws": "^8" } }

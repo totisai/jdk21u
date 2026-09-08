@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Networking demo — OpenJDK on WebAssembly</title>
+<link rel="stylesheet" href="assets/site.css">
+<script src="coi-serviceworker.js"></script>
+<style>
+  main{flex:1;display:flex;flex-direction:column;min-height:0}
+  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 18px;border-bottom:1px solid var(--edge);background:var(--panel2)}
+  .bar label{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)}
+  .bar input{font-family:var(--mono);font-size:13px;background:#0b0f14;color:var(--ink);border:1px solid var(--edge);border-radius:6px;padding:7px 10px}
+  .banner{background:#2a2113;border-bottom:1px solid #6b5320;color:#e8c37a;padding:9px 18px;font-size:12.5px;line-height:1.5}
+  .banner code{font-family:var(--mono);color:#ffd987}
+  #console{flex:1;margin:0;overflow:auto;background:#0b0f14;color:var(--ink);font-family:var(--mono);
+    font-size:12.5px;line-height:1.5;padding:14px;white-space:pre-wrap;word-break:break-word}
+  #console .err{color:var(--err)} #console .sys{color:var(--faint)}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="logo">🌐</span>
+  <h1>Real <b>TCP</b> from Java, via the relay</h1>
+  <span class="spacer"></span>
+  <button class="btn" id="run">Fetch ▸</button>
+  <nav><a href="index.html">Home</a><a href="repl.html">REPL</a><a href="swing.html">Swing</a><a href="gl.html">3D</a><a href="fs.html">Files</a><a href="net.html">Net</a><a href="jit.html">JIT</a><a href="integrate.html">Docs</a></nav>
+</div>
+
+<div class="banner">
+  Browsers can't open raw TCP, so Java sockets are tunneled over a WebSocket to a
+  local relay. <b>Start it first:</b>
+  <code>node wasm-jvm/framework/net/tcp-relay.cjs 8114</code>, then set the relay URL
+  below and press Fetch. Without a running relay the connection times out. (On the
+  public HTTPS site a <code>ws://localhost</code> relay is blocked as mixed content —
+  run this page locally over http for networking.)
+</div>
+
+<main>
+  <div class="bar">
+    <label>Relay</label><input id="relay" value="ws://localhost:8114/" style="width:220px">
+    <label>URL</label><input id="target" value="http://example.com/" style="width:320px">
+    <span class="status" id="status"><span class="dot"></span><span id="statusText">idle</span></span>
+  </div>
+  <pre id="console"></pre>
+</main>
+
+<script src="jvm/jvmnet.js"></script>
+<script>
+const $=(id)=>document.getElementById(id);
+const con=$('console'), runBtn=$('run'), status=$('status'), statusText=$('statusText');
+function setStatus(c,t){ status.className='status '+c; statusText.textContent=t; }
+function log(s,cls){ const sp=document.createElement('span'); if(cls)sp.className=cls;
+  sp.textContent=s.endsWith('\n')?s:s+'\n'; con.appendChild(sp); con.scrollTop=con.scrollHeight; }
+
+// HTTP client compiled + run in-VM (the target URL is injected). The net bundle
+// tunnels the socket over the relay configured in /work/bridge.
+function program(url){
+  return `import java.io.*; import java.net.*;
+public class Main {
+  public static void main(String[] a) throws Exception {
+    HttpURLConnection c = (HttpURLConnection) new URL(${JSON.stringify(url)}).openConnection();
+    c.setConnectTimeout(9000); c.setReadTimeout(9000);
+    System.out.println("HTTP " + c.getResponseCode() + " " + c.getResponseMessage());
+    String server = c.getHeaderField("Server"); if (server != null) System.out.println("Server: " + server);
+    InputStream in = c.getInputStream();
+    byte[] body = in.readAllBytes();
+    try { in.close(); } catch (Exception ignore) {}   // benign 'Bad file descriptor' on teardown
+    String[] lines = new String(body).split("\\n", 26);
+    for (int i = 0; i < Math.min(lines.length, 25); i++) System.out.println(lines[i]);
+    System.out.println("[received " + body.length + " bytes]");
+  }
+}`;
+}
+
+let dataPromise=null;
+function loadData(){
+  if(dataPromise) return dataPromise;
+  setStatus('busy','downloading net runtime…');
+  dataPromise=fetch('jvm/jvmnet.data.gz').then(r=>{ if(!r.ok) throw new Error('fetch jvmnet.data.gz '+r.status);
+    return new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer(); });
+  return dataPromise;
+}
+
+// The net bundle's Runner is one-shot (compile + run + exit), so each Fetch boots a
+// fresh VM: it connects the relay bridge, runs the HTTP client, streams output, exits.
+let running=false;
+async function run(){
+  if(running) return;
+  if(!window.crossOriginIsolated){ log('Not cross-origin isolated yet; reload to activate the service worker.','err'); return; }
+  if(!window.createJVMNet){ log('runtime failed to load (jvm/jvmnet.js).','err'); return; }
+  running=true; runBtn.disabled=true; con.textContent='';
+  const relay=$('relay').value.trim(), target=$('target').value.trim();
+  log('GET '+target+'  via '+relay,'sys');
+  try{
+    const buf=await loadData();
+    setStatus('busy','booting JVM + connecting relay…');
+    window.createJVMNet({
+      arguments:['Runner'],
+      getPreloadedPackage:()=>buf,
+      preRun:[M=>{ try{M.FS.mkdir('/work');}catch(e){}
+        try{M.FS.writeFile('/work/bridge', relay);}catch(e){}
+        try{M.FS.writeFile('/work/src.java', program(target));}catch(e){} }],
+      print:s=>{ if(/unsupported syscall/.test(s)) return;
+        if(/\[WSPS\]/.test(s)) return; if(/socket bridge|compiled |ran /.test(s)) log(s.trim(),'sys'); else log(s); },
+      printErr:s=>{ if(!/unsupported syscall|Unknown module: java\.desktop|Bad file descriptor/.test(s)) log(s,'err'); },
+      onExit:()=>{ setStatus('ok','done'); running=false; runBtn.disabled=false; },
+    });
+  }catch(e){ log('Error: '+(e&&e.message||e),'err'); setStatus('err','error'); running=false; runBtn.disabled=false; }
+}
+runBtn.onclick=run;
+log('Ready. Start the relay, set the URL, and press Fetch.','sys');
+</script>
+</body>
+</html>

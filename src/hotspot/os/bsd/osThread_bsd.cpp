@@ -30,13 +30,17 @@
 #include <signal.h>
 
 void OSThread::pd_initialize() {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__EMSCRIPTEN__)
   _thread_id        = 0;
 #else
   _thread_id        = nullptr;
 #endif
   _unique_thread_id = 0;
+#ifdef __EMSCRIPTEN__
+  _pthread_id       = 0;
+#else
   _pthread_id       = nullptr;
+#endif
   _siginfo          = nullptr;
   _ucontext         = nullptr;
   _expanding_stack  = 0;

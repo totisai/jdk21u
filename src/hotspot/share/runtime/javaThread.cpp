@@ -400,7 +400,12 @@ void JavaThread::check_for_valid_safepoint_state() {
 
 JavaThread::JavaThread() :
   // Initialize fields
-
+#ifdef __EMSCRIPTEN__
+  _wasmjit_oops(nullptr),
+  _wasmjit_oops_cap(0),
+  _wasmjit_oops_top(0),
+  _wasmjit_osr_bb(0),
+#endif
   _on_thread_list(false),
   DEBUG_ONLY(_java_call_counter(0) COMMA)
   _entry_point(nullptr),
@@ -1345,6 +1350,12 @@ void JavaThread::oops_do_no_frames(OopClosure* f, CodeBlobClosure* cf) {
   // around using this function
   f->do_oop((oop*) &_vm_result);
   f->do_oop((oop*) &_exception_oop);
+#ifdef __EMSCRIPTEN__
+  // WasmJit oop-spill area (see javaThread.hpp): relocate JIT-parked oops.
+  for (int i = 0; i < _wasmjit_oops_top; i++) {
+    f->do_oop(&_wasmjit_oops[i]);
+  }
+#endif
 #if INCLUDE_JVMCI
   f->do_oop((oop*) &_jvmci_reserved_oop0);
 #endif

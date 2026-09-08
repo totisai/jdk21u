@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VM filesystem inspector — OpenJDK on WebAssembly</title>
+<link rel="stylesheet" href="assets/site.css">
+<script src="coi-serviceworker.js"></script>
+<style>
+  main{flex:1;display:grid;grid-template-columns:minmax(280px,40%) 1fr;min-height:0}
+  @media(max-width:760px){main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}}
+  .pane{display:flex;flex-direction:column;min-height:0;min-width:0}
+  .pane.tree{border-right:1px solid var(--edge)}
+  .pane .head{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--edge);
+    background:var(--panel2)}
+  .pane .head .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)}
+  #tree{flex:1;overflow:auto;padding:8px 0;font-family:var(--mono);font-size:12.5px}
+  #tree .row{padding:2px 14px;cursor:pointer;white-space:nowrap;color:var(--ink)}
+  #tree .row:hover{background:#161b22}
+  #tree .row.sel{background:#1c2230}
+  #tree .row .sz{color:var(--faint);font-size:11px;margin-left:8px}
+  #tree .dir{color:var(--accent2)}
+  #viewer{flex:1;overflow:auto;margin:0;padding:14px;font-family:var(--mono);font-size:12.5px;
+    line-height:1.5;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
+  #vpath{font-family:var(--mono);font-size:12px;color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="logo">🗂️</span>
+  <h1>VM <b>filesystem</b> inspector</h1>
+  <span class="spacer"></span>
+  <span class="status" id="status"><span class="dot"></span><span id="statusText">idle</span></span>
+  <button class="btn" id="run">Mount ▸</button>
+  <nav><a href="index.html">Home</a><a href="repl.html">REPL</a><a href="swing.html">Swing</a><a href="gl.html">3D</a><a href="fs.html">Files</a><a href="net.html">Net</a><a href="jit.html">JIT</a><a href="integrate.html">Docs</a></nav>
+</div>
+
+<main>
+  <div class="pane tree">
+    <div class="head"><span class="lbl">MEMFS</span><span style="flex:1"></span><span id="vpath"></span></div>
+    <div id="tree"></div>
+  </div>
+  <div class="pane">
+    <div class="head"><span class="lbl">Contents</span></div>
+    <pre id="viewer">Press Mount to boot the VM and browse its in-memory filesystem
+(the JDK modules under /jdk, the app classpath /app, and the /work scratch area).</pre>
+  </div>
+</main>
+
+<script src="jvm/jvm-base.js"></script>
+<script>
+const $=(id)=>document.getElementById(id);
+const treeEl=$('tree'), viewer=$('viewer'), status=$('status'), statusText=$('statusText'), runBtn=$('run');
+function setStatus(c,t){ status.className='status '+c; statusText.textContent=t; }
+let mod=null, bootP=null;
+
+function boot(){
+  if(bootP) return bootP;
+  if(!window.crossOriginIsolated) return Promise.reject(new Error('not cross-origin isolated (reload to activate the service worker)'));
+  setStatus('busy','downloading runtime…');
+  bootP=(async()=>{
+    const gz=await fetch('jvm/jvm-base.data.gz'); if(!gz.ok) throw new Error('fetch jvm-base.data.gz '+gz.status);
+    const buf=await new Response(gz.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+    setStatus('busy','booting JVM…');
+    await new Promise((resolve,reject)=>{
+      let ready=false;
+      window.createJVM({ arguments:['ReplServer'], getPreloadedPackage:()=>buf,
+        preRun:[M=>{ mod=M; try{M.FS.mkdir('/work');}catch(e){} try{M.FS.writeFile('/work/req','0');}catch(e){} }],
+        print:s=>{ if(/\[repl\] ready/.test(s) && !ready){ ready=true; resolve(); } },
+        printErr:()=>{}, onExit:()=>{ if(!ready) reject(new Error('VM exited during boot')); } });
+    });
+  })();
+  return bootP;
+}
+
+// ---- tree ----
+const FS=()=>mod.FS;
+function isDir(p){ try{ return FS().isDir(FS().stat(p).mode); }catch(e){ return false; } }
+function list(p){ try{ return FS().readdir(p).filter(n=>n!=='.'&&n!=='..').sort(); }catch(e){ return []; } }
+function human(n){ return n<1024?n+' B':n<1048576?(n/1024).toFixed(1)+' K':(n/1048576).toFixed(1)+' M'; }
+const expanded=new Set(['/']);
+
+function render(){
+  treeEl.innerHTML='';
+  const walk=(path,depth)=>{
+    for(const name of list(path)){
+      const full=(path==='/'?'':path)+'/'+name;
+      const dir=isDir(full);
+      const row=document.createElement('div');
+      row.className='row'+(dir?' dir':'');
+      row.style.paddingLeft=(14+depth*16)+'px';
+      let size=''; if(!dir){ try{ size=human(FS().stat(full).size); }catch(e){} }
+      row.innerHTML=(dir?(expanded.has(full)?'▾ ':'▸ '):'&nbsp;&nbsp;')+name+(size?'<span class="sz">'+size+'</span>':'');
+      row.onclick=(e)=>{ e.stopPropagation();
+        if(dir){ if(expanded.has(full)) expanded.delete(full); else expanded.add(full); render(); }
+        else openFile(full,row); };
+      treeEl.appendChild(row);
+      if(dir && expanded.has(full)) walk(full,depth+1);
+    }
+  };
+  walk('/',0);
+}
+function openFile(full,row){
+  [...treeEl.querySelectorAll('.row.sel')].forEach(r=>r.classList.remove('sel')); row.classList.add('sel');
+  $('vpath').textContent=full;
+  let st; try{ st=FS().stat(full); }catch(e){ viewer.textContent='stat failed: '+e.message; return; }
+  if(st.size>2*1024*1024){ viewer.textContent='('+human(st.size)+' — too large to preview)'; return; }
+  let bytes; try{ bytes=FS().readFile(full); }catch(e){ viewer.textContent='read failed: '+e.message; return; }
+  // Decide text vs binary: printable ratio in first 4 KB.
+  const n=Math.min(bytes.length,4096); let printable=0;
+  for(let i=0;i<n;i++){ const b=bytes[i]; if(b===9||b===10||b===13||(b>=32&&b<127)) printable++; }
+  if(n>0 && printable/n>0.85){ viewer.textContent=new TextDecoder().decode(bytes); }
+  else {
+    // hex preview for binary (e.g. .class files)
+    let out='binary, '+human(st.size)+'\n\n'; const m=Math.min(bytes.length,512);
+    for(let i=0;i<m;i+=16){ let hex='',asc='';
+      for(let j=0;j<16 && i+j<m;j++){ const b=bytes[i+j]; hex+=b.toString(16).padStart(2,'0')+' '; asc+=(b>=32&&b<127)?String.fromCharCode(b):'.'; }
+      out+=i.toString(16).padStart(6,'0')+'  '+hex.padEnd(48)+' '+asc+'\n'; }
+    viewer.textContent=out;
+  }
+}
+
+runBtn.onclick=async()=>{
+  runBtn.disabled=true;
+  try{ await boot(); setStatus('ok','mounted — click folders to expand, files to view'); render(); }
+  catch(e){ setStatus('err','error'); viewer.textContent='Boot failed: '+(e&&e.message||e); }
+  finally{ runBtn.disabled=false; }
+};
+</script>
+</body>
+</html>

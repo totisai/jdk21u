@@ -41,6 +41,14 @@ m4_include([lib-tests.m4])
 ################################################################################
 AC_DEFUN_ONCE([LIB_DETERMINE_DEPENDENCIES],
 [
+  # Emscripten/wasm is headless & sandboxed: none of the desktop system libs exist.
+  if test "x$OPENJDK_TARGET_OS" = xemscripten; then
+    NEEDS_LIB_X11=false
+    NEEDS_LIB_FONTCONFIG=false
+    NEEDS_LIB_CUPS=false
+    NEEDS_LIB_FREETYPE=false
+    NEEDS_LIB_ALSA=false
+  else
   # Check if X11 is needed
   if test "x$OPENJDK_TARGET_OS" = xwindows || test "x$OPENJDK_TARGET_OS" = xmacosx; then
     # No X11 support on windows or macosx
@@ -79,6 +87,7 @@ AC_DEFUN_ONCE([LIB_DETERMINE_DEPENDENCIES],
     NEEDS_LIB_ALSA=true
   else
     NEEDS_LIB_ALSA=false
+  fi
   fi
 
   # Check if ffi is needed

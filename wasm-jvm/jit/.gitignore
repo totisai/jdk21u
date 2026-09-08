@@ -1,0 +1,10 @@
+node_modules/
+out/
+# compiled test spikes (build outputs of jitc.c / spike.c)
+jitc.js
+jitc.wasm
+spike.js
+spike.wasm
+spike_mt.js
+spike_mt.wasm
+spike_mt.worker.js

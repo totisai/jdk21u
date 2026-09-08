@@ -66,6 +66,12 @@ AC_DEFUN([PLATFORM_EXTRACT_VARS_FROM_CPU],
       VAR_CPU_BITS=64
       VAR_CPU_ENDIAN=little
       ;;
+    wasm32)
+      VAR_CPU=wasm32
+      VAR_CPU_ARCH=wasm
+      VAR_CPU_BITS=32
+      VAR_CPU_ENDIAN=little
+      ;;
     ia64)
       VAR_CPU=ia64
       VAR_CPU_ARCH=ia64
@@ -224,6 +230,10 @@ AC_DEFUN([PLATFORM_EXTRACT_VARS_FROM_OS],
       ;;
     *aix*)
       VAR_OS=aix
+      VAR_OS_TYPE=unix
+      ;;
+    *emscripten*)
+      VAR_OS=emscripten
       VAR_OS_TYPE=unix
       ;;
     *)
@@ -532,6 +542,11 @@ AC_DEFUN([PLATFORM_SETUP_LEGACY_VARS_HELPER],
 
   HOTSPOT_$1_OS=${OPENJDK_$1_OS}
   if test "x$OPENJDK_$1_OS" = xmacosx; then
+    HOTSPOT_$1_OS=bsd
+  fi
+  # Emscripten reuses the BSD HotSpot source layer (os/bsd, os_cpu/bsd_zero),
+  # like macosx does; Wasm-specific divergences are guarded with __EMSCRIPTEN__.
+  if test "x$OPENJDK_$1_OS" = xemscripten; then
     HOTSPOT_$1_OS=bsd
   fi
   AC_SUBST(HOTSPOT_$1_OS)

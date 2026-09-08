@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How the JIT works — OpenJDK on WebAssembly</title>
+<link rel="stylesheet" href="assets/site.css">
+<script src="coi-serviceworker.js"></script>
+<style>
+  article{max-width:820px;margin:0 auto;padding:28px 24px 60px;line-height:1.6}
+  article h2{font-size:24px;margin:0 0 6px}
+  article h3{font-size:16px;margin:34px 0 8px;padding-top:14px;border-top:1px solid var(--edge)}
+  article p{color:var(--ink);font-size:14px}
+  article p.lead{color:var(--dim);font-size:15px}
+  article ul{color:var(--ink);font-size:14px;padding-left:20px}
+  article li{margin:4px 0}
+  article code{font-family:var(--mono);color:var(--accent2);background:#0b0f14;padding:1px 5px;border-radius:4px;font-size:12.5px}
+  pre{background:#0b0f14;border:1px solid var(--edge);border-radius:8px;padding:14px;overflow:auto;
+    font-family:var(--mono);font-size:12.5px;line-height:1.5;color:var(--ink)}
+  pre .c{color:var(--faint)}
+  pre .k{color:var(--accent)}
+  table{border-collapse:collapse;font-size:13px;margin:8px 0;width:100%}
+  th,td{border:1px solid var(--edge);padding:6px 10px;text-align:left;vertical-align:top}
+  th{color:var(--dim);font-weight:600}
+  td code{white-space:nowrap}
+  .note{background:#161b22;border:1px solid var(--edge);border-left:3px solid var(--accent);
+    border-radius:6px;padding:10px 14px;color:var(--dim);font-size:13px;margin:14px 0}
+  .benchbar{display:flex;align-items:center;gap:14px;margin:10px 0}
+  #benchcon{min-height:120px;color:var(--ok);white-space:pre-wrap}
+  #benchcon .err{color:var(--err)}
+  #benchcon .sys{color:var(--faint)}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="logo">☕</span>
+  <h1>How the <b>JIT</b> works</h1>
+  <span class="spacer"></span>
+  <nav><a href="index.html">Home</a><a href="repl.html">REPL</a><a href="swing.html">Swing</a><a href="gl.html">3D</a><a href="fs.html">Files</a><a href="net.html">Net</a><a href="jit.html">JIT</a><a href="integrate.html">Docs</a></nav>
+</div>
+
+<article>
+  <h2>A bytecode → WebAssembly JIT</h2>
+  <p class="lead">The Zero VM is a pure interpreter — you can't emit machine code inside
+     the wasm sandbox. So <b>WasmJit</b> compiles hot Java methods into a fresh
+     WebAssembly module <em>at run time</em>, installs the function in the indirect
+     table, and the interpreter calls that instead of interpreting.</p>
+
+  <h3>The dispatch path</h3>
+  <p>At <code>method_entry</code> the interpreter asks <code>WasmJit::compiled_entry(m)</code>.
+     For an eligible method the compiler emits wasm, does <code>new&nbsp;WebAssembly.Module</code>
+     + <code>addFunction</code>, caches the table index per <code>Method</code>, and returns it.
+     The hook in <code>bytecodeInterpreter.cpp</code> reads the arguments from the frame,
+     calls the wasm function, pushes the result, and jumps to <code>handle_return</code> —
+     exactly as an <code>ireturn</code> would.</p>
+  <ul>
+    <li>The JVM and wasm are both stack machines, so arithmetic maps almost 1:1
+        (<code>iadd</code> → <code>i32.add</code>).</li>
+    <li>Control flow uses a <b>dispatch loop</b>: each basic block becomes
+        <code>if (i32.eq $bb b) { …; $bb = next; br $L }</code> inside a wasm <code>loop</code>,
+        with <code>select</code> choosing the next block. This handles loops and if/else
+        without a relooper.</li>
+  </ul>
+
+  <h3>Compiler pipeline</h3>
+  <p>The compiler lives in the JDK tree at
+     <code>src/hotspot/share/interpreter/wasm/</code>, organised as a small pipeline of
+     per-concern translation units rather than one monolith. A compile threads a
+     <b>compile context</b> (<code>Ctx</code>) — the method, its constant pool, the
+     local/oop layout, the operand value-type stack, and spill bookkeeping — through
+     three stages, all writing wasm into a growable byte buffer (<code>Buf</code>).</p>
+  <pre><span class="c">bytecode ─▶ analysis ──▶ emit (per-op) ──▶ module assembly ─▶ wasm module bytes
+             (Ctx)         (Ctx, Buf)          (Buf)</span></pre>
+
+  <table>
+    <tr><th>Unit</th><th>Source</th><th>Responsibility</th></tr>
+    <tr><td><b>Driver</b></td><td><code>core/wasmJit.cpp</code></td>
+      <td>Eligibility gate, orchestration, module creation, and the per-<code>Method</code>
+          table-index cache. Kept lock-free on the ineligible/warming hot path — a global
+          mutex per dispatch melts down across emscripten pthreads.</td></tr>
+    <tr><td><b>Analysis</b></td><td><code>compiler/wasmAnalysis.cpp</code></td>
+      <td>Pre-passes: <code>classify_locals</code> (wasm local types),
+          <code>analyze_oop_slots</code> (which slots hold oops → GC-scanned spill array),
+          and <code>compile_cf</code>, which lays out the basic-block dispatch loop and the
+          per-throw-site exception handler dispatch.</td></tr>
+    <tr><td><b>Stack map</b></td><td><code>compiler/wasmStackmap.cpp</code></td>
+      <td><code>op_consumed</code> (entries a throwing op pops) and <code>stack_delta</code>
+          (net operand-stack delta in JVM words) — keep the value-type stack and spill
+          state correct across ops.</td></tr>
+    <tr><td><b>Emit</b></td><td><code>compiler/wasmEmit.cpp</code></td>
+      <td>The per-bytecode translation: <code>emit_op</code> (the main opcode switch) plus
+          helpers for field access, calls, allocation, <code>ldc</code>, synchronization
+          unlock, and intrinsics.</td></tr>
+    <tr><td><b>Resolver</b></td><td><code>compiler/wasmResolver.cpp</code></td>
+      <td>Constant-pool / callee resolution behind the call and field-access emitters.</td></tr>
+    <tr><td><b>Assembler</b></td><td><code>assembler/wasmAssembler.cpp</code></td>
+      <td>The <code>Buf</code> buffer, LEB128 primitives, the instruction emitters, and
+          <code>emit_module</code> (wraps the body in a complete wasm module — type,
+          function, memory, and code sections).</td></tr>
+    <tr><td><b>Opcode table</b></td><td><code>assembler/wasmOpcodes.hpp</code></td>
+      <td><code>enum WOp</code> — every opcode the backend emits, named per the wasm core
+          spec, valued at its encoded byte.</td></tr>
+  </table>
+
+  <p>Two headers make the boundaries explicit: <code>wasmCompiler.hpp</code> is the
+     <b>public</b> entry the driver calls, while <code>wasmCompilerInternal.hpp</code> holds
+     the cross-unit calls the stages make to one another — so the per-concern
+     <code>.cpp</code> files need not be one translation unit.</p>
+
+  <h3>The emitter layer</h3>
+  <p>Emit sites don't write raw opcode bytes. The assembler exposes a named, composite
+     emitter for each instruction — much like a HotSpot <code>MacroAssembler</code> — so a
+     translation reads as the wasm it produces:</p>
+  <pre><span class="c">// null-check the top-of-stack oop, then load a field:</span>
+tee_local(c, x-&gt;TMPI);          <span class="c">// keep the oop</span>
+bput(c, <span class="k">op_i32_eqz</span>);            <span class="c">// oop == 0 ?</span>
+if_void(c);                     <span class="c">//   if null:</span>
+  emit_call(c, Imp::THROW_NPE); <span class="c">//     throw NPE</span>
+  emit_exc(x, c, pc);           <span class="c">//     dispatch / propagate</span>
+emit_end(c);
+get_local(c, x-&gt;TMPI);
+mem_op(c, <span class="k">op_i32_load</span>, 2, off); <span class="c">// i32.load  align=2  offset=off</span></pre>
+  <p>Single-byte ALU / compare / conversion ops go through <code>bput(c, op_*)</code> with a
+     named <code>WOp</code>; multi-byte idioms have dedicated emitters —
+     <code>i32_const</code>/<code>i64_const</code>, <code>emit_call</code>, <code>mem_op</code>
+     (load/store with <code>{align, offset}</code>), the structured-control forms
+     <code>if_void</code>/<code>if_type</code>/<code>block_void</code>/<code>loop_void</code>/<code>emit_end</code>,
+     <code>br</code>/<code>br_if</code>, <code>ret</code>, <code>drop</code>, and <code>trunc_sat</code>.</p>
+  <div class="note">
+    Because each <code>WOp</code> equals its encoded byte, adopting a name is byte-identical.
+    One subtlety the emitters hide: the value-type bytes a <code>block</code>/<code>if</code>/<code>loop</code>
+    takes as a blocktype (<code>i64</code> = <code>0x7e</code>) collide with arithmetic opcodes
+    (<code>i64.mul</code> = <code>0x7e</code>). <code>if_type(c, vt_i64)</code> names the blocktype
+    case so the two are never confused.
+  </div>
+
+  <h3>What it compiles</h3>
+  <ul>
+    <li><b>All primitive types</b> — int/long/float/double ALU, NaN-correct compares,
+        every conversion, numeric <code>ldc</code>. Integer <code>div</code>/<code>rem</code>
+        throw on /0 and handle the MIN/-1 overflow inline.</li>
+    <li><b>Control flow</b> — all conditional branches, <code>goto</code>,
+        <code>tableswitch</code>/<code>lookupswitch</code>, loops, full stack shuffles,
+        in-method <code>try/catch</code>.</li>
+    <li><b>Objects &amp; arrays</b> — instance &amp; static fields (primitive and reference,
+        with the write barrier), array load/store with bounds checks, <code>new</code>,
+        <code>checkcast</code>/<code>instanceof</code>, <code>athrow</code>.</li>
+    <li><b>Calls</b> — <code>invokestatic</code>/<code>special</code>/<code>virtual</code>/<code>interface</code>,
+        one uniform i64-widened ABI into JIT'd or interpreted callees.</li>
+    <li><b>GC safety</b> — oops are re-read from GC-scanned frame slots, produced oops use a
+        GC-scanned spill array, and loops emit a per-back-edge safepoint poll.</li>
+  </ul>
+  <p>Methods named <code>jit*</code> are compiled by default; <code>WASMJIT_ALL=1</code> JITs
+     every eligible method. Correctness is pinned by <b>differential benches</b>: each JITs
+     its <code>jit*</code> methods and interprets <code>p*</code> twins in the same run, so a
+     mismatch is a test failure. All pass.</p>
+
+  <h3>Live benchmark — interpreter vs JIT</h3>
+  <p>The same hot kernel, run twice in one VM. Under the default gate,
+     <code>jitKernel()</code> is compiled to WebAssembly on its first call while the
+     identical <code>pKernel()</code> stays in the Zero interpreter — so timing the two is
+     a direct interpreter-vs-JIT comparison of the same code. Press <b>Run</b> to compile
+     and execute it right here in your browser (the first run boots the JVM, ~5&nbsp;s;
+     the VM then stays warm).</p>
+  <pre id="benchsrc" aria-label="benchmark source"></pre>
+  <div class="benchbar">
+    <button class="btn" id="runbench">Run benchmark ▸</button>
+    <span class="status" id="bstatus"><span class="dot"></span><span id="bstatusText">idle</span></span>
+  </div>
+  <pre id="benchcon">(output appears here)</pre>
+  <div class="note">
+    Runs entirely client-side — no server. Absolute times vary by machine and browser;
+    the JIT typically shows a several-× speedup on integer- and loop-heavy code, because
+    the whole loop becomes one wasm function instead of a per-bytecode dispatch.
+  </div>
+
+  <h3>Results</h3>
+  <ul>
+    <li><b>Straight-line kernel</b> (60 ops, 10M calls): ~6× over the interpreter.</li>
+    <li><b>Loop kernel</b> (40M-iteration loop): ~12× — the whole loop runs as one wasm
+        function.</li>
+    <li><b>Swing app in JIT mode</b> (<code>WASMJIT_ALL=1</code>): renders at ~37&nbsp;fps while
+        the JIT compiles real JDK methods (<code>Math.floorMod</code>,
+        <code>Integer.hashCode</code>, AQS lock helpers, …).</li>
+  </ul>
+
+  <div class="note">
+    Full write-up in the repo: <code>wasm-jvm/docs/jit.md</code>. Try it live in the
+    <a href="repl.html">REPL</a> (compile Java in-browser) or watch it drive the
+    <a href="swing.html">Swing demo</a>.
+  </div>
+</article>
+
+<footer>
+  <span>OpenJDK 21 → wasm32 (emscripten, Zero)</span>
+  <span>Interpreter JIT: bytecode → WebAssembly</span>
+  <a href="https://github.com/totisai/jdk21u">GitHub</a>
+</footer>
+
+<script src="jvm/jvm-base.js"></script>
+<script>
+const $=(id)=>document.getElementById(id);
+const bcon=$('benchcon'), bbtn=$('runbench'), bstatus=$('bstatus'), bstatusText=$('bstatusText');
+
+// The benchmark: two byte-for-byte identical hot kernels. Under the default JIT gate,
+// jitKernel() is compiled to wasm on first call; pKernel() stays interpreted.
+const BENCH=`public class Main {
+    static long jitKernel(int iters) {   // name starts with "jit" -> JIT-compiled
+        long a = 1, acc = 0;
+        for (int i = 0; i < iters; i++) {
+            a = a * 6364136223846793005L + 1442695040888963407L;
+            long x = a >>> 33;
+            acc += (x * 2654435761L) ^ (i * 40503L);
+        }
+        return acc;
+    }
+    static long pKernel(int iters) {      // identical body -> stays interpreted
+        long a = 1, acc = 0;
+        for (int i = 0; i < iters; i++) {
+            a = a * 6364136223846793005L + 1442695040888963407L;
+            long x = a >>> 33;
+            acc += (x * 2654435761L) ^ (i * 40503L);
+        }
+        return acc;
+    }
+    public static void main(String[] args) {
+        int iters = 8_000_000;
+        jitKernel(1);                              // trigger synchronous compilation
+        long t0 = System.nanoTime();
+        long ri = pKernel(iters);                  // interpreted
+        double iMs = (System.nanoTime() - t0) / 1e6;
+        long t1 = System.nanoTime();
+        long rj = jitKernel(iters);                // JIT-compiled (wasm)
+        double jMs = (System.nanoTime() - t1) / 1e6;
+        System.out.printf("iterations : %,d%n", iters);
+        System.out.printf("interpreted: %8.1f ms%n", iMs);
+        System.out.printf("JIT (wasm) : %8.1f ms%n", jMs);
+        System.out.printf("speedup    : %.1fx%n", iMs / jMs);
+        System.out.println(ri == rj ? "results match \\u2713" : "MISMATCH");
+    }
+}`;
+$('benchsrc').textContent = BENCH;
+
+function bset(c,t){ bstatus.className='status '+c; bstatusText.textContent=t; }
+function blog(s,cls){ const sp=document.createElement('span'); if(cls)sp.className=cls;
+  sp.textContent=s.endsWith('\n')?s:s+'\n'; bcon.appendChild(sp); bcon.scrollTop=bcon.scrollHeight; }
+
+// Warm VM: boot ReplServer once (WITHOUT WASMJIT_ALL, so only jit* compiles),
+// then drive it via /work/req + /work/resp — same protocol as the REPL page.
+let mod=null, bootPromise=null, seq=0, phase='boot';
+function boot(){
+  if(bootPromise) return bootPromise;
+  if(!window.crossOriginIsolated) return Promise.reject(new Error('not cross-origin isolated (reload to activate the service worker)'));
+  if(!window.createJVM) return Promise.reject(new Error('runtime failed to load (jvm/jvm-base.js)'));
+  bset('busy','downloading runtime…');
+  bootPromise=(async()=>{
+    const gz=await fetch('jvm/jvm-base.data.gz');
+    if(!gz.ok) throw new Error('fetch jvm-base.data.gz '+gz.status);
+    const buf=await new Response(gz.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+    bset('busy','booting JVM (one time)…');
+    await new Promise((resolve,reject)=>{
+      let readySeen=false;
+      window.createJVM({
+        arguments:['ReplServer'],
+        getPreloadedPackage:(n,s)=>buf,
+        preRun:[M=>{ mod=M; try{M.FS.mkdir('/work');}catch(e){} try{M.FS.writeFile('/work/req','0');}catch(e){} }],
+        print:s=>{
+          if(/unsupported syscall/.test(s)) return;
+          if(!readySeen){ if(/\[repl\] ready/.test(s)){ readySeen=true; resolve(); } return; }
+          if(phase!=='run') return;
+          if(/^\[compiled |^\[ran /.test(s)) blog(s.trim(),'sys'); else blog(s);
+        },
+        printErr:s=>{ if(phase==='run' && !/unsupported syscall|Unknown module: java\.desktop/.test(s)) blog(s,'err'); },
+        onExit:()=>{ if(!readySeen) reject(new Error('VM exited during boot')); },
+      });
+    });
+  })();
+  return bootPromise;
+}
+
+let running=false;
+async function runBench(){
+  if(running) return;
+  running=true; bbtn.disabled=true;
+  try{
+    const first=!bootPromise;
+    await boot();
+    bcon.textContent=''; phase='run'; seq++;
+    const t0=performance.now();
+    mod.FS.writeFile('/work/src.java', BENCH);
+    mod.FS.writeFile('/work/req', String(seq));
+    bset('busy', first ? 'compiling (first run warms javac)…' : 'running…');
+    await new Promise((resolve)=>{ const iv=setInterval(()=>{ let r=''; try{ r=mod.FS.readFile('/work/resp',{encoding:'utf8'}).trim(); }catch(e){}
+      if(r===String(seq)){ clearInterval(iv); resolve(); } },40); });
+    bset('ok','done in '+((performance.now()-t0)/1000).toFixed(1)+'s');
+  }catch(e){ blog('Error: '+(e&&e.message||e),'err'); bset('err','error'); }
+  finally{ phase='idle'; running=false; bbtn.disabled=false; }
+}
+bbtn.onclick=runBench;
+</script>
+</body>
+</html>

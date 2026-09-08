@@ -508,10 +508,17 @@ void* os::native_java_library() {
     char ebuf[1024];
 
     // Load java dll
+#ifdef STATIC_BUILD
+    // Monolithic (Emscripten) build: libjava is linked in; resolve via the
+    // static symbol table instead of locating an on-disk shared object.
+    os::snprintf_checked(buffer, sizeof(buffer), "java");
+    _native_java_library = dll_load(buffer, ebuf, sizeof(ebuf));
+#else
     if (dll_locate_lib(buffer, sizeof(buffer), Arguments::get_dll_dir(),
                        "java")) {
       _native_java_library = dll_load(buffer, ebuf, sizeof(ebuf));
     }
+#endif
     if (_native_java_library == nullptr) {
       vm_exit_during_initialization("Unable to load native library", ebuf);
     }

@@ -1,0 +1,47 @@
+--- src/java.desktop/macosx/classes/sun/font/CFontManager.java	2026-08-11 19:39:59
++++ /tmp/cfm/sun/font/CFontManager.java	2026-08-12 13:02:13
+@@ -214,13 +214,13 @@
+                 loadedAllFonts = true;
+             }
+ 
+-            String defaultFont = "Lucida Grande";
+-            String defaultFallback = "Lucida Grande";
++            String defaultFont = "Roboto";
++            String defaultFallback = "Roboto";
+ 
+             setupLogicalFonts("Dialog", defaultFont, defaultFallback);
+-            setupLogicalFonts("Serif", "Times", "Times New Roman");
++            setupLogicalFonts("Serif", "Roboto", "Roboto");
+             setupLogicalFonts("SansSerif", defaultFont, defaultFallback);
+-            setupLogicalFonts("Monospaced", "Menlo", "Courier");
++            setupLogicalFonts("Monospaced", "Roboto", "Roboto");
+             setupLogicalFonts("DialogInput", defaultFont, defaultFallback);
+         }
+     }
+@@ -276,11 +276,22 @@
+         if (realFamily == null) return false;
+ 
+         Font2D realFont = realFamily.getFontWithExactStyleMatch(style);
+-        if (!(realFont instanceof CFont cFont)) return false;
++        if (realFont == null) realFont = realFamily.getFont(style);
++        if (realFont == null) return false;
+ 
+-        CFont newFont = new CFont(cFont, logicalFamilyName);
+-        registerGenericFont(newFont, true);
+-
++        if (realFont instanceof CFont cFont) {
++            CFont newFont = new CFont(cFont, logicalFamilyName);
++            registerGenericFont(newFont, true);
++        } else {
++            // wasm/headless: the backing font is a freetype file font (e.g. Roboto),
++            // not a CoreText CFont. Alias it under the logical family name so
++            // findFont2D(logicalName) resolves. AWT synthesizes bold/italic.
++            FontFamily lf = FontFamily.getFamily(logicalFamilyName);
++            if (lf == null) {
++                lf = new FontFamily(logicalFamilyName, true, realFont.getRank());
++            }
++            lf.setFont(realFont, style);
++        }
+         return true;
+     }
+ 

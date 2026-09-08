@@ -731,7 +731,12 @@ bool os::has_allocatable_memory_limit(size_t* limit) {
 }
 
 void* os::get_default_process_handle() {
-#ifdef __APPLE__
+#if defined(__EMSCRIPTEN__)
+  // Monolithic Wasm build: there is no real process dll handle. Return a
+  // non-null sentinel; os::dll_lookup ignores the handle and resolves names
+  // through the generated static symbol table (jvm_symtab_lookup).
+  return (void*)1;
+#elif defined(__APPLE__)
   // MacOS X needs to use RTLD_FIRST instead of RTLD_LAZY
   // to avoid finding unexpected symbols on second (or later)
   // loads of a library.
@@ -741,8 +746,18 @@ void* os::get_default_process_handle() {
 #endif
 }
 
+#ifdef __EMSCRIPTEN__
+extern "C" void* jvm_symtab_lookup(const char* name);
+#endif
+
 void* os::dll_lookup(void* handle, const char* name) {
+#ifdef __EMSCRIPTEN__
+  // Under the monolithic Wasm build all native entry points are resolved via a
+  // generated static symbol table rather than dlsym on a real shared object.
+  return jvm_symtab_lookup(name);
+#else
   return dlsym(handle, name);
+#endif
 }
 
 void os::dll_unload(void *lib) {
@@ -1244,7 +1259,9 @@ static bool _use_clock_monotonic_condattr = false;
 // Determine what POSIX API's are present and do appropriate
 // configuration.
 void os::Posix::init(void) {
-#if defined(_ALLBSD_SOURCE)
+#if defined(__EMSCRIPTEN__)
+  clock_tics_per_sec = sysconf(_SC_CLK_TCK);
+#elif defined(_ALLBSD_SOURCE)
   clock_tics_per_sec = CLK_TCK;
 #else
   clock_tics_per_sec = sysconf(_SC_CLK_TCK);

@@ -51,6 +51,13 @@ void SafepointMechanism::default_initialize() {
   poll_bit_only = USE_POLL_BIT_ONLY;
 #endif
 
+#ifdef __EMSCRIPTEN__
+  // The Wasm sandbox has no page protection (os::protect_memory is a no-op), so
+  // the guard-page safepoint scheme can never trap a thread. Use thread-local
+  // poll-bit polling instead, which needs no memory protection.
+  poll_bit_only = true;
+#endif
+
   if (poll_bit_only) {
     _poll_page_armed_value    = poll_bit();
     _poll_page_disarmed_value = 0;

@@ -123,4 +123,24 @@ ElfFile* ElfDecoder::get_elf_file(const char* filepath) {
 
   return file;
 }
+
+#ifdef __EMSCRIPTEN__
+// On Emscripten the ELF decoder is compiled (target is not __APPLE__) but the
+// BSD os layer is used, so the Linux definition of ElfDecoder::demangle
+// (os/linux/decoder_linux.cpp) is not built. Provide it here; Emscripten's
+// libc++abi supplies __cxa_demangle.
+#include <cxxabi.h>
+
+bool ElfDecoder::demangle(const char* symbol, char* buf, int buflen) {
+  int   status;
+  char* result;
+  if ((result = abi::__cxa_demangle(symbol, nullptr, nullptr, &status)) != nullptr) {
+    jio_snprintf(buf, buflen, "%s", result);
+    ::free(result);
+    return true;
+  }
+  return false;
+}
+#endif // __EMSCRIPTEN__
+
 #endif // !_WINDOWS && !__APPLE__

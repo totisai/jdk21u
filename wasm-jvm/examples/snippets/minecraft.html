@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8"><title>WasmJVM · Minecraft (fullscreen)</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}</style>
+<canvas id="c"></canvas>
+<script type="module">
+// Minecraft 1.2.5 filling the whole browser window (render.viewport:'fill').
+// The game jars are fetched at run time and staged into the JVM's filesystem
+// (the "app from jars" path); worlds persist to IndexedDB. First load ~80 MB.
+import { WasmJVM } from '../wasmjvm.js';
+new WasmJVM({
+  runtime: { basePath: '../', tier: 'gl' },
+  app: {
+    mainClass: 'MCLaunch',
+    jars: [
+      { path: '/app/mc/client.jar',      url: '../app/mc/client.jar' },
+      { path: '/app/mc/lwjgl.jar',       url: '../app/mc/lwjgl.jar' },
+      { path: '/app/mc/lwjgl_util.jar',  url: '../app/mc/lwjgl_util.jar' },
+      { path: '/app/mc/jinput-stub.jar', url: '../app/mc/jinput-stub.jar' },
+    ],
+  },
+  render: { canvas: '#c', viewport: 'fill', mode: 'gl', input: true, mousemove: true },
+  storage: { enabled: true, mount: '/home/web_user' },
+  onStdout: s => console.log(s),
+}).start();
+</script>

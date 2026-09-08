@@ -65,7 +65,27 @@ EXCLUDE_FILES += \
     .template \
     #
 
-ifeq ($(call isTargetOs, macosx), true)
+ifeq ($(call isTargetOs, emscripten), true)
+  # Headless emscripten target: there is no X11/native windowing system. Exclude
+  # the entire unix platform desktop tree (sun/awt incl. X11, sun/java2d/{x11,xr,
+  # opengl,...}, sun/font). A minimal headless platform layer lives in
+  # src/java.desktop/emscripten/classes. This lets java.desktop's shared classes
+  # compile so the JNI headers (needed to build libawt etc.) are generated.
+  EXCLUDE_FILES += $(patsubst $(TOPDIR)/src/java.desktop/unix/classes/%,%, \
+      $(shell find $(TOPDIR)/src/java.desktop/unix/classes/sun/awt \
+                   $(TOPDIR)/src/java.desktop/unix/classes/sun/java2d \
+                   $(TOPDIR)/src/java.desktop/unix/classes/sun/font -name '*.java'))
+else ifeq ($(call isTargetOs, emscripten), true)
+  # Headless emscripten target: there is no X11/native windowing system. Exclude
+  # the entire unix platform desktop tree (sun/awt incl. X11, sun/java2d/{x11,xr,
+  # opengl,...}, sun/font). A minimal headless platform layer lives in
+  # src/java.desktop/emscripten/classes. This lets java.desktop's shared classes
+  # compile so the JNI headers (needed to build libawt etc.) are generated.
+  EXCLUDE_FILES += $(patsubst $(TOPDIR)/src/java.desktop/unix/classes/%,%, \
+      $(shell find $(TOPDIR)/src/java.desktop/unix/classes/sun/awt \
+                   $(TOPDIR)/src/java.desktop/unix/classes/sun/java2d \
+                   $(TOPDIR)/src/java.desktop/unix/classes/sun/font -name '*.java'))
+else ifeq ($(call isTargetOs, macosx), true)
   # exclude all X11 on Mac.
   EXCLUDES += \
       sun/awt/screencast \

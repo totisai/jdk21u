@@ -37,7 +37,7 @@
 #include <strings.h>
 #endif
 
-#if defined(_ALLBSD_SOURCE)
+#if defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
 #include <net/ethernet.h>
 #include <net/if_dl.h>
 #include <ifaddrs.h>
@@ -890,6 +890,36 @@ static netif *enumInterfaces(JNIEnv *env) {
         }
     }
 
+#ifdef __EMSCRIPTEN__
+    // emscripten has no getifaddrs/SIOCGIFCONF, so enumeration comes back empty
+    // and NetworkInterface.getNetworkInterfaces() throws "No network interfaces
+    // configured" -- which breaks libraries like Netty's NetUtil. Synthesize a
+    // loopback (lo -> 127.0.0.1/8) so the interface list is never empty.
+    if (ifs == NULL) {
+        ifs = (netif *)calloc(1, sizeof(netif));
+        if (ifs != NULL) {
+            ifs->name = strdup("lo");
+            ifs->index = 1;
+            ifs->virtual = 0;
+            ifs->addr = NULL; ifs->childs = NULL; ifs->next = NULL;
+            netaddr *na = (netaddr *)calloc(1, sizeof(netaddr));
+            struct sockaddr_in *sin = (struct sockaddr_in *)calloc(1, sizeof(struct sockaddr_in));
+            if (na != NULL && sin != NULL) {
+                sin->sin_family = AF_INET;
+                sin->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                na->addr = (struct sockaddr *)sin;
+                na->brdcast = NULL;
+                na->mask = 8;
+                na->family = AF_INET;
+                na->next = NULL;
+                ifs->addr = na;
+            } else {
+                free(na); free(sin);
+            }
+        }
+    }
+#endif
+
     return ifs;
 }
 
@@ -1659,7 +1689,7 @@ static int getFlags(int sock, const char *ifname, int *flags) {
 #endif /* _AIX */
 
 /** BSD **/
-#if defined(_ALLBSD_SOURCE)
+#if defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
 
 /*
  * Opens a socket for further ioctl calls. Tries AF_INET socket first and
@@ -1856,4 +1886,53 @@ static int getFlags(int sock, const char *ifname, int *flags) {
     }
     return 0;
 }
-#endif /* _ALLBSD_SOURCE */
+#endif /* _ALLBSD_SOURCE && !__EMSCRIPTEN__ */
+
+/** Emscripten **/
+#if defined(__EMSCRIPTEN__)
+
+/*
+ * A browser/wasm sandbox has no real network interfaces and none of the
+ * BSD/Darwin interface-enumeration facilities (getifaddrs, sysctl, AF_LINK,
+ * sockaddr_dl, ioctl(SIOCGIF*)). Provide stubs that report no interfaces and
+ * an unsupported result for per-interface queries.
+ */
+
+static int openSocketWithFallback(JNIEnv *env, const char *ifname) {
+    JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
+                    "Network interfaces are not supported on this platform");
+    return -1;
+}
+
+static netif *enumIPv4Interfaces(JNIEnv *env, int sock, netif *ifs) {
+    // no interfaces to enumerate
+    return ifs;
+}
+
+static netif *enumIPv6Interfaces(JNIEnv *env, int sock, netif *ifs) {
+    // no interfaces to enumerate
+    return ifs;
+}
+
+static int getIndex(int sock, const char *name) {
+    return -1;
+}
+
+static int getMacAddress
+  (JNIEnv *env, const char *ifname, const struct in_addr *addr,
+   unsigned char *buf)
+{
+    return -1;
+}
+
+static int getMTU(JNIEnv *env, int sock, const char *ifname) {
+    JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
+                    "getMTU() is not supported on this platform");
+    return -1;
+}
+
+static int getFlags(int sock, const char *ifname, int *flags) {
+    return -1;
+}
+
+#endif /* __EMSCRIPTEN__ */

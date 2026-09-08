@@ -1,0 +1,5 @@
+# Raw (uncompressed) data and module packs are not committed; the gzipped
+# jvmawt.data.gz IS committed so the published site works out of the box.
+# Regenerate the runtime with ./build-pages-assets.sh.
+jvm/*.data
+jvm/packs/

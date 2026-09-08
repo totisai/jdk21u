@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D / WebGL demo — OpenJDK on WebAssembly</title>
+<link rel="stylesheet" href="assets/site.css">
+<script src="coi-serviceworker.js"></script>
+<style>
+  main{flex:1;display:flex;gap:24px;padding:24px;align-items:flex-start;flex-wrap:wrap}
+  .stage{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:18px;
+    display:flex;flex-direction:column;gap:12px}
+  #display{width:min(70vw,640px);height:auto;aspect-ratio:4/3;border:1px solid var(--edge);
+    border-radius:6px;background:#0b0f14}
+  /* GL context canvas: rendered off-screen; GLDemo reads its pixels back into /work/frame.bin. */
+  #glsurface{position:absolute;left:-10000px;top:0;width:480px;height:360px}
+  .side{flex:1;min-width:260px;max-width:520px;display:flex;flex-direction:column;gap:14px}
+  .side h3{margin:0;font-size:15px}
+  .side p{margin:0;color:var(--dim);font-size:13px;line-height:1.55}
+  .side code{font-family:var(--mono);color:var(--accent2)}
+  #console{margin:0;background:#0b0f14;border:1px solid var(--edge);border-radius:8px;
+    font-family:var(--mono);font-size:12px;line-height:1.5;padding:12px;color:var(--dim);
+    max-height:170px;overflow:auto;white-space:pre-wrap}
+  #console .err{color:var(--err)}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="logo">🧊</span>
+  <h1>3D / <b>WebGL</b> from Java</h1>
+  <span class="spacer"></span>
+  <button class="btn" id="run">Launch ▸</button>
+  <nav><a href="index.html">Home</a><a href="repl.html">REPL</a><a href="swing.html">Swing</a><a href="gl.html">3D</a><a href="fs.html">Files</a><a href="net.html">Net</a><a href="jit.html">JIT</a><a href="integrate.html">Docs</a></nav>
+</div>
+
+<main>
+  <div class="stage">
+    <canvas id="display" width="480" height="360"></canvas>
+    <canvas id="glsurface" width="480" height="360"></canvas>
+    <span class="status" id="status"><span class="dot"></span><span id="statusText">idle</span></span>
+  </div>
+  <div class="side">
+    <h3>OpenGL → WebGL, driven by Java</h3>
+    <p>
+      A Java program (<code>GLDemo</code>) issues OpenGL ES calls through JNI native
+      shims; a GL→WebGL translator in the runtime renders a spinning, shaded triangle.
+      The frame's pixels are read back and blitted here — the same pixel pipeline the
+      Java2D demos use, so it displays reliably across browsers. First launch downloads
+      the GL runtime (~32&nbsp;MB gzipped).
+    </p>
+    <pre id="console"></pre>
+  </div>
+</main>
+
+<script type="module">
+import { Screen } from './jvm/screen.js';
+const $=(id)=>document.getElementById(id);
+const con=$('console'), runBtn=$('run'), disp=$('display'), status=$('status'), statusText=$('statusText');
+function setStatus(c,t){ status.className='status '+c; statusText.textContent=t; }
+function log(s,cls){ const sp=document.createElement('span'); if(cls)sp.className=cls;
+  sp.textContent=s.endsWith('\n')?s:s+'\n'; con.appendChild(sp); con.scrollTop=con.scrollHeight; }
+
+let dataPromise=null;
+function loadData(){
+  if(dataPromise) return dataPromise;
+  setStatus('busy','downloading GL runtime…');
+  dataPromise=fetch('jvm/jvmgl.data.gz').then(r=>{ if(!r.ok) throw new Error('fetch jvmgl.data.gz '+r.status);
+    return new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer(); });
+  return dataPromise;
+}
+
+let launched=false, mod=null, screen=null;
+async function launch(){
+  if(launched) return;
+  if(!window.crossOriginIsolated){ log('Not cross-origin isolated yet; reload to activate the service worker.','err'); return; }
+  launched=true; runBtn.disabled=true; con.textContent='';
+  if(screen){ try{screen.stop();}catch(e){} screen=null; }
+  const started=performance.now();
+  try{
+    const buf=await loadData();
+    setStatus('busy','booting JVM…');
+    if(!window.createJVMGL){ await new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='jvm/jvmgl.js'; s.onload=res; s.onerror=()=>rej(new Error('load jvmgl.js')); document.body.appendChild(s); }); }
+    window.createJVMGL({
+      arguments:['GLDemo'],
+      getPreloadedPackage:(n,s)=>buf,
+      preRun:[M=>{ mod=M; try{M.FS.mkdir('/work');}catch(e){} }],
+      print:s=>{ if(!/unsupported syscall/.test(s)) log(s.trim()); },
+      printErr:s=>{},
+    });
+    // Present GLDemo's readback frames (/work/frame.bin) on the 2D display canvas.
+    disp.width=480; disp.height=360;
+    screen=new Screen(disp, { present:'2d', input:false, renderLoop:true, getModule:()=>mod, onLog:()=>{} }).start();
+    let last=-1;
+    const iv=setInterval(()=>{ if(!mod) return; let seq=-1; try{ seq=+mod.FS.readFile('/work/seq',{encoding:'utf8'}); }catch(e){}
+      if(seq>0 && seq!==last){ last=seq; setStatus('ok','rendering — frame '+seq); } },250);
+  }catch(e){ log('Launch failed: '+(e&&e.message||e),'err'); setStatus('err','error'); }
+  finally{ runBtn.disabled=false; launched=false; }
+}
+runBtn.onclick=launch;
+log('Ready. Press Launch to render 3D from Java via WebGL.');
+</script>
+</body>
+</html>

@@ -62,6 +62,15 @@ AC_DEFUN([FLAGS_SETUP_SHARED_LIBS],
       SET_SHARED_LIBRARY_NAME=''
       SET_SHARED_LIBRARY_MAPFILE=''
 
+    elif test "x$OPENJDK_TARGET_OS" = xemscripten; then
+      # Emscripten: plain '-shared' emits a relocatable object with no dylink
+      # section; SIDE_MODULE produces a real loadable Wasm side module.
+      SHARED_LIBRARY_FLAGS="-sSIDE_MODULE=1 -pthread"
+      SET_EXECUTABLE_ORIGIN=''
+      SET_SHARED_LIBRARY_ORIGIN=''
+      SET_SHARED_LIBRARY_NAME=''
+      SET_SHARED_LIBRARY_MAPFILE=''
+
     else
       # Default works for linux, might work on other platforms as well.
       SHARED_LIBRARY_FLAGS='-shared'
@@ -499,6 +508,14 @@ AC_DEFUN([FLAGS_SETUP_CFLAGS_HELPER],
     CFLAGS_OS_DEF_JVM="-DAIX -D_LARGE_FILES"
   elif test "x$OPENJDK_TARGET_OS" = xbsd; then
     CFLAGS_OS_DEF_JDK="-D_ALLBSD_SOURCE"
+  elif test "x$OPENJDK_TARGET_OS" = xemscripten; then
+    # Emscripten reuses the BSD HotSpot sources; set _ALLBSD_SOURCE/BSD explicitly
+    # (Emscripten doesn't get BSD from system headers). __EMSCRIPTEN__ (from emcc)
+    # marks the Wasm-specific divergences. -fno-stack-protector: the Emscripten
+    # link doesn't supply __stack_chk_guard for these modules. -pthread: shared-
+    # memory threading (Web Workers) that HotSpot's threads require.
+    CFLAGS_OS_DEF_JVM="-D_ALLBSD_SOURCE -DBSD -fno-stack-protector -pthread"
+    CFLAGS_OS_DEF_JDK="-D_ALLBSD_SOURCE -D_GNU_SOURCE -fno-stack-protector -pthread"
   elif test "x$OPENJDK_TARGET_OS" = xwindows; then
     CFLAGS_OS_DEF_JVM="-D_WINDOWS -DWIN32 -D_JNI_IMPLEMENTATION_"
   fi

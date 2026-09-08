@@ -84,6 +84,21 @@ class JavaThread: public Thread {
   friend class Continuation;
   friend class Threads;
   friend class ServiceThread; // for deferred OopHandle release access
+ public:
+#ifdef __EMSCRIPTEN__
+  // WasmJit oop-spill area: a per-thread, GC-scanned stack of object references
+  // where the runtime JIT parks oops that must survive a safepoint but have no
+  // interpreter-frame slot (new/newarray results, astore'd object locals). Scanned
+  // in oops_do so the moving GC finds and relocates them. Lazily allocated; fixed
+  // capacity (never realloc'd, so region addresses handed to JIT frames stay valid).
+  oop* _wasmjit_oops;
+  int  _wasmjit_oops_cap;
+  int  _wasmjit_oops_top;
+  // OSR: the block index at which a JIT'd method should begin when entered on-stack
+  // (mid-loop) instead of at method entry. Read+cleared by the JIT prologue via
+  // wasmjit_osr_bb(); 0 means normal (method-entry) start.
+  int  _wasmjit_osr_bb;
+#endif
  private:
   bool           _on_thread_list;                // Is set when this JavaThread is added to the Threads list
 

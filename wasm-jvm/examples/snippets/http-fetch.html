@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8"><title>WasmJVM · HTTP</title>
+<style>body{font:14px system-ui;margin:20px;max-width:800px}
+pre{background:#111;color:#0f0;padding:12px;white-space:pre-wrap;min-height:120px}
+input{width:60%;font:14px monospace}button{font-size:15px;padding:6px 12px}</style>
+<h2>WasmJVM — real HTTP over a TCP relay (net tier)</h2>
+<p>Runs <code>HttpURLConnection</code> in the wasm JVM; sockets are tunneled to a
+native relay. <b>Start the relay first:</b>
+<code>node wasm-jvm/tcp-relay.cjs 8114</code></p>
+<p><input id="url" value="http://example.com/"> <button id="go">GET</button></p>
+<pre id="out"></pre>
+<script type="module">
+import { WasmJVM } from '../wasmjvm.js';
+const out = document.getElementById('out');
+const log = s => { out.textContent += s + '\n'; };
+document.getElementById('go').onclick = async () => {
+  out.textContent = ''; document.getElementById('go').disabled = true;
+  const url = document.getElementById('url').value.replace(/"/g, '');
+  const source = `import java.net.*; import java.io.*;
+public class Main {
+  public static void main(String[] a) throws Exception {
+    HttpURLConnection c = (HttpURLConnection) new URL("${url}").openConnection();
+    System.out.println("HTTP " + c.getResponseCode() + " " + c.getResponseMessage());
+    System.out.println("Server: " + c.getHeaderField("Server"));
+    try (var r = new BufferedReader(new InputStreamReader(c.getInputStream()))) {
+      String line; int n = 0;
+      while ((line = r.readLine()) != null && n++ < 12) System.out.println("| " + line);
+    }
+    System.out.println("[fetched over a real TCP socket, from wasm]");
+  }
+}`;
+  const jvm = new WasmJVM({
+    runtime: { basePath: '../', tier: 'net' },
+    app: { source },
+    network: { enabled: true, relay: 'ws://localhost:8114/' },
+    onStdout: log, onStderr: log,
+    onExit: () => { document.getElementById('go').disabled = false; },
+  });
+  await jvm.start();
+};
+</script>

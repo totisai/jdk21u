@@ -43,7 +43,13 @@ void* getProcessHandle() {
     if (procHandle != NULL) {
         return procHandle;
     }
-#ifdef __APPLE__
+#ifdef __EMSCRIPTEN__
+    // Static Wasm build: dlopen(NULL) returns NULL and symbol resolution goes
+    // through a generated static table (os::dll_lookup ignores the handle).
+    // Return a non-NULL sentinel so builtin-library loading (which checks
+    // `if (handle)`) proceeds.
+    procHandle = (void*)&procHandle;
+#elif defined(__APPLE__)
     procHandle = (void*)dlopen(NULL, RTLD_FIRST);
 #else
     procHandle = (void*)dlopen(NULL, RTLD_LAZY);

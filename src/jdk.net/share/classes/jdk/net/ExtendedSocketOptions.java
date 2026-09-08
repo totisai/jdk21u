@@ -399,6 +399,14 @@ public final class ExtendedSocketOptions {
         }
 
         private static PlatformSocketOptions create() {
+            // The wasm/emscripten target is built on the bsd/macOS layer, so
+            // OperatingSystem.current() reports MACOS and would load the native-
+            // backed MacOSXSocketOptions -- which isn't compiled for this target.
+            // wasm has no extended socket options anyway, so use the base no-op
+            // implementation (every option reports "unsupported").
+            if ("emscripten".equalsIgnoreCase(System.getProperty("os.name"))) {
+                return new PlatformSocketOptions();
+            }
             return switch (OperatingSystem.current()) {
                 case LINUX -> newInstance("jdk.net.LinuxSocketOptions");
                 case MACOS -> newInstance("jdk.net.MacOSXSocketOptions");

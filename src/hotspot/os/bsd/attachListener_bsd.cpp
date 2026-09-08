@@ -356,6 +356,7 @@ BsdAttachOperation* BsdAttachListener::dequeue() {
     }
 
     // get the credentials of the peer and check the effective uid/guid
+#ifndef __EMSCRIPTEN__
     uid_t puid;
     gid_t pgid;
     if (::getpeereid(s, &puid, &pgid) != 0) {
@@ -370,6 +371,7 @@ BsdAttachOperation* BsdAttachListener::dequeue() {
       ::close(s);
       continue;
     }
+#endif
 
     // peer credential look okay so we read the request
     BsdAttachOperation* op = read_request(s);

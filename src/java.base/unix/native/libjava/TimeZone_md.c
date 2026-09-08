@@ -492,6 +492,14 @@ tzerr:
     return javatz;
 }
 
+#elif defined(__EMSCRIPTEN__)
+
+static char *
+getPlatformTimeZoneID()
+{
+    return NULL;
+}
+
 #endif /* defined(_AIX) */
 
 /*

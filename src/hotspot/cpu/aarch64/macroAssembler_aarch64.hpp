@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, 2021, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2014, 2024, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,6 +31,7 @@
 #include "metaprogramming/enableIf.hpp"
 #include "oops/compressedOops.hpp"
 #include "runtime/vm_version.hpp"
+#include "utilities/globalDefinitions.hpp"
 #include "utilities/powerOfTwo.hpp"
 
 class OopMap;
@@ -570,6 +571,19 @@ public:
     msr(0b011, 0b0100, 0b0100, 0b001, zr);
   }
 
+  // FPCR : op1 == 011
+  //        CRn == 0100
+  //        CRm == 0100
+  //        op2 == 000
+
+  inline void get_fpcr(Register reg) {
+    mrs(0b11, 0b0100, 0b0100, 0b000, reg);
+  }
+
+  inline void set_fpcr(Register reg) {
+    msr(0b011, 0b0100, 0b0100, 0b000, reg);
+  }
+
   // DCZID_EL0: op1 == 011
   //            CRn == 0000
   //            CRm == 0000
@@ -664,6 +678,9 @@ public:
 
   // Support for sign-extension (hi:lo = extend_sign(lo))
   void extend_sign(Register hi, Register lo);
+
+  // Clean up a subword typed value to the representation in compliance with JVMS §2.3
+  void narrow_subword_type(Register reg, BasicType bt);
 
   // Load and store values by size and signed-ness
   void load_sized_value(Register dst, Address src, size_t size_in_bytes, bool is_signed);
@@ -984,6 +1001,31 @@ public:
                                      Label* L_failure,
                                      bool set_cond_codes = false);
 
+  // As above, but with a constant super_klass.
+  // The result is in Register result, not the condition codes.
+  bool lookup_secondary_supers_table(Register r_sub_klass,
+                                     Register r_super_klass,
+                                     Register temp1,
+                                     Register temp2,
+                                     Register temp3,
+                                     FloatRegister vtemp,
+                                     Register result,
+                                     u1 super_klass_slot,
+                                     bool stub_is_near = false);
+
+  void verify_secondary_supers_table(Register r_sub_klass,
+                                     Register r_super_klass,
+                                     Register temp1,
+                                     Register temp2,
+                                     Register result);
+
+  void lookup_secondary_supers_table_slow_path(Register r_super_klass,
+                                               Register r_array_base,
+                                               Register r_array_index,
+                                               Register r_bitmap,
+                                               Register temp1,
+                                               Register result);
+
   // Simplified, combined version, good for typical uses.
   // Falls through on failure.
   void check_klass_subtype(Register sub_klass,
@@ -1033,8 +1075,8 @@ public:
 #define verify_method_ptr(reg) _verify_method_ptr(reg, "broken method " #reg, __FILE__, __LINE__)
 #define verify_klass_ptr(reg) _verify_klass_ptr(reg, "broken klass " #reg, __FILE__, __LINE__)
 
-  // only if +VerifyFPU
-  void verify_FPU(int stack_depth, const char* s = "illegal FPU state");
+  // Restore cpu control state after JNI call
+  void restore_cpu_control_state_after_jni(Register tmp1, Register tmp2);
 
   // prints msg, dumps registers and stops execution
   void stop(const char* msg);
@@ -1198,6 +1240,7 @@ public:
   // - relocInfo::virtual_call_type
   //
   // Return: the call PC or null if CodeCache is full.
+  // Clobbers: rscratch1
   address trampoline_call(Address entry);
 
   static bool far_branches() {
@@ -1384,6 +1427,24 @@ public:
 
   address arrays_equals(Register a1, Register a2, Register result, Register cnt1,
                         Register tmp1, Register tmp2, Register tmp3, int elem_size);
+
+// Ensure that the inline code and the stub use the same registers.
+#define ARRAYS_HASHCODE_REGISTERS \
+  do {                      \
+    assert(result == r0  && \
+           ary    == r1  && \
+           cnt    == r2  && \
+           vdata0 == v3  && \
+           vdata1 == v2  && \
+           vdata2 == v1  && \
+           vdata3 == v0  && \
+           vmul0  == v4  && \
+           vmul1  == v5  && \
+           vmul2  == v6  && \
+           vmul3  == v7  && \
+           vpow   == v12 && \
+           vpowm  == v13, "registers must match aarch64.ad"); \
+  } while (0)
 
   void string_equals(Register a1, Register a2, Register result, Register cnt1,
                      int elem_size);

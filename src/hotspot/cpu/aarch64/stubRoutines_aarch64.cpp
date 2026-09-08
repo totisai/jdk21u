@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2024, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2014, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -48,6 +48,11 @@ address StubRoutines::aarch64::_zero_blocks = nullptr;
 address StubRoutines::aarch64::_count_positives = nullptr;
 address StubRoutines::aarch64::_count_positives_long = nullptr;
 address StubRoutines::aarch64::_large_array_equals = nullptr;
+address StubRoutines::aarch64::_large_arrays_hashcode_boolean = nullptr;
+address StubRoutines::aarch64::_large_arrays_hashcode_byte = nullptr;
+address StubRoutines::aarch64::_large_arrays_hashcode_char = nullptr;
+address StubRoutines::aarch64::_large_arrays_hashcode_int = nullptr;
+address StubRoutines::aarch64::_large_arrays_hashcode_short = nullptr;
 address StubRoutines::aarch64::_compare_long_string_LL = nullptr;
 address StubRoutines::aarch64::_compare_long_string_UU = nullptr;
 address StubRoutines::aarch64::_compare_long_string_LU = nullptr;
@@ -62,6 +67,26 @@ static void empty_spin_wait() { }
 address StubRoutines::aarch64::_spin_wait = CAST_FROM_FN_PTR(address, empty_spin_wait);
 
 bool StubRoutines::aarch64::_completed = false;
+
+ATTRIBUTE_ALIGNED(64) uint16_t StubRoutines::aarch64::_kyberConsts[] =
+{
+    // Because we sometimes load these in pairs, montQInvModR, kyber_q
+    // and kyberBarrettMultiplier should stay together and in this order.
+    0xF301, 0xF301, 0xF301, 0xF301, 0xF301, 0xF301, 0xF301, 0xF301, // montQInvModR
+    0x0D01, 0x0D01, 0x0D01, 0x0D01, 0x0D01, 0x0D01, 0x0D01, 0x0D01, // kyber_q
+    0x4EBF, 0x4EBF, 0x4EBF, 0x4EBF, 0x4EBF, 0x4EBF, 0x4EBF, 0x4EBF, // kyberBarrettMultiplier
+    0x0200, 0x0200, 0x0200, 0x0200, 0x0200, 0x0200, 0x0200, 0x0200, // toMont((kyber_n / 2)^-1 (mod kyber_q))
+    0x0549, 0x0549, 0x0549, 0x0549, 0x0549, 0x0549, 0x0549, 0x0549  // montRSquareModQ
+};
+
+ATTRIBUTE_ALIGNED(64) uint32_t StubRoutines::aarch64::_dilithiumConsts[] =
+{
+    58728449, 58728449, 58728449, 58728449, // montQInvModR
+    8380417, 8380417, 8380417, 8380417, // dilithium_q
+    16382, 16382, 16382, 16382, // toMont((dilithium_n)^-1 (mod dilithium_q))
+    2365951, 2365951, 2365951, 2365951, // montRSquareModQ
+    5373807, 5373807, 5373807, 5373807 // addend for modular reduce
+};
 
 /**
  *  crc_table[] from jdk/src/share/native/java/util/zip/zlib-1.2.5/crc32.h

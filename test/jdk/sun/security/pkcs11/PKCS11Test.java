@@ -31,7 +31,6 @@ import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.AlgorithmParameters;
 import java.security.InvalidAlgorithmParameterException;
@@ -54,15 +53,16 @@ import java.util.Properties;
 import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 
 import jdk.test.lib.Platform;
+import jdk.test.lib.Utils;
 import jdk.test.lib.artifacts.Artifact;
 import jdk.test.lib.artifacts.ArtifactResolver;
-import jdk.test.lib.artifacts.ArtifactResolverException;
 import jtreg.SkippedException;
 
 public abstract class PKCS11Test {
@@ -82,10 +82,10 @@ public abstract class PKCS11Test {
 
     // Version of the NSS artifact. This coincides with the version of
     // the NSS version
-    private static final String NSS_BUNDLE_VERSION = "3.91";
+    private static final String NSS_BUNDLE_VERSION = "3.117";
     private static final String NSSLIB = "jpg.tests.jdk.nsslib";
 
-    static double nss_version = -1;
+    static Version nss_version = null;
     static ECCState nss_ecc_status = ECCState.Basic;
 
     // The NSS library we need to search for in getNSSLibDir()
@@ -95,8 +95,8 @@ public abstract class PKCS11Test {
 
     // NSS versions of each library.  It is simpler to keep nss_version
     // for quick checking for generic testing than many if-else statements.
-    static double softoken3_version = -1;
-    static double nss3_version = -1;
+    static Version softoken3_version = null;
+    static Version nss3_version = null;
     static Provider pkcs11 = newPKCS11Provider();
     private static String PKCS11_BASE;
     private static Map<String, String[]> osMap;
@@ -243,10 +243,6 @@ public abstract class PKCS11Test {
 
     static String getNSSLibDir(String library) throws Exception {
         Path libPath = getNSSLibPath(library);
-        if (libPath == null) {
-            return null;
-        }
-
         String libDir = String.valueOf(libPath.getParent()) + File.separatorChar;
         System.out.println("nssLibDir: " + libDir);
         System.setProperty("pkcs11test.nss.libdir", libDir);
@@ -260,12 +256,7 @@ public abstract class PKCS11Test {
     static Path getNSSLibPath(String library) throws Exception {
         String osid = getOsId();
         Path libraryName = Path.of(System.mapLibraryName(library));
-        Path nssLibPath = fetchNssLib(osid, libraryName);
-        if (nssLibPath == null) {
-            throw new SkippedException("Warning: unsupported OS: " + osid
-                    + ", please initialize NSS library location, skipping test");
-        }
-        return nssLibPath;
+        return fetchNssLib(osid, libraryName);
     }
 
     private static String getOsId() {
@@ -280,13 +271,29 @@ public abstract class PKCS11Test {
     }
 
     static boolean isBadNSSVersion(Provider p) {
-        double nssVersion = getNSSVersion();
-        if (isNSS(p) && nssVersion >= 3.11 && nssVersion < 3.12) {
-            System.out.println("NSS 3.11 has a DER issue that recent " +
-                    "version do not, skipping");
-            return true;
+        Version nssVersion = getNSSVersion();
+        if (isNSS(p)) {
+            // bad version is just between [3.11,3.12)
+            return nssVersion.major == 3 && 11 == nssVersion.minor;
+        } else {
+            return false;
         }
-        return false;
+    }
+
+    public record Version(int major, int minor, int patch) {}
+
+    protected static Version parseVersionString(String version) {
+        String [] parts = version.split("\\.");
+        int major = Integer.parseInt(parts[0]);
+        int minor = 0;
+        int patch = 0;
+        if (parts.length >= 2) {
+            minor = Integer.parseInt(parts[1]);
+        }
+        if (parts.length >= 3) {
+            patch = Integer.parseInt(parts[2]);
+        }
+        return new Version(major, minor, patch);
     }
 
     protected static void safeReload(String lib) {
@@ -315,26 +322,26 @@ public abstract class PKCS11Test {
         return p.getName().equalsIgnoreCase("SUNPKCS11-NSS");
     }
 
-    static double getNSSVersion() {
-        if (nss_version == -1)
+    static Version getNSSVersion() {
+        if (nss_version == null)
             getNSSInfo();
         return nss_version;
     }
 
     static ECCState getNSSECC() {
-        if (nss_version == -1)
+        if (nss_version == null)
             getNSSInfo();
         return nss_ecc_status;
     }
 
-    public static double getLibsoftokn3Version() {
-        if (softoken3_version == -1)
+    public static Version getLibsoftokn3Version() {
+        if (softoken3_version == null)
             return getNSSInfo("softokn3");
         return softoken3_version;
     }
 
-    public static double getLibnss3Version() {
-        if (nss3_version == -1)
+    public static Version getLibnss3Version() {
+        if (nss3_version == null)
             return getNSSInfo("nss3");
         return nss3_version;
     }
@@ -349,7 +356,7 @@ public abstract class PKCS11Test {
     // $Header: NSS <version>
     // Version: NSS <version>
     // Here, <version> stands for NSS version.
-    static double getNSSInfo(String library) {
+    static Version getNSSInfo(String library) {
         // look for two types of headers in NSS libraries
         String nssHeader1 = "$Header: NSS";
         String nssHeader2 = "Version: NSS";
@@ -358,15 +365,15 @@ public abstract class PKCS11Test {
         int i = 0;
         Path libfile = null;
 
-        if (library.compareTo("softokn3") == 0 && softoken3_version > -1)
+        if (library.compareTo("softokn3") == 0 && softoken3_version != null)
             return softoken3_version;
-        if (library.compareTo("nss3") == 0 && nss3_version > -1)
+        if (library.compareTo("nss3") == 0 && nss3_version != null)
             return nss3_version;
 
         try {
             libfile = getNSSLibPath();
             if (libfile == null) {
-                return 0.0;
+                return parseVersionString("0.0");
             }
             try (InputStream is = Files.newInputStream(libfile)) {
                 byte[] data = new byte[1000];
@@ -402,7 +409,7 @@ public abstract class PKCS11Test {
         if (!found) {
             System.out.println("lib" + library +
                     " version not found, set to 0.0: " + libfile);
-            nss_version = 0.0;
+            nss_version = parseVersionString("0.0");
             return nss_version;
         }
 
@@ -415,26 +422,7 @@ public abstract class PKCS11Test {
             version.append(c);
         }
 
-        // If a "dot dot" release, strip the extra dots for double parsing
-        String[] dot = version.toString().split("\\.");
-        if (dot.length > 2) {
-            version = new StringBuilder(dot[0] + "." + dot[1]);
-            for (int j = 2; dot.length > j; j++) {
-                version.append(dot[j]);
-            }
-        }
-
-        // Convert to double for easier version value checking
-        try {
-            nss_version = Double.parseDouble(version.toString());
-        } catch (NumberFormatException e) {
-            System.out.println("===== Content start =====");
-            System.out.println(s);
-            System.out.println("===== Content end =====");
-            System.out.println("Failed to parse lib" + library +
-                    " version. Set to 0.0");
-            e.printStackTrace();
-        }
+        nss_version = parseVersionString(version.toString());
 
         System.out.print("library: " + library + ", version: " + version + ".  ");
 
@@ -486,14 +474,13 @@ public abstract class PKCS11Test {
             return null;
         }
 
-        String base = getBase();
-
+        String nssConfigDir = copyNssFiles();
         String libfile = libdir + System.mapLibraryName(nss_library);
 
         String customDBdir = System.getProperty("CUSTOM_DB_DIR");
         String dbdir = (customDBdir != null) ?
                 customDBdir :
-                base + SEP + "nss" + SEP + "db";
+                nssConfigDir + SEP + "db";
         // NSS always wants forward slashes for the config path
         dbdir = dbdir.replace('\\', '/');
 
@@ -503,7 +490,7 @@ public abstract class PKCS11Test {
         System.setProperty("pkcs11test.nss.db", dbdir);
         return (customConfig != null) ?
                 customConfig :
-                base + SEP + "nss" + SEP + customConfigName;
+                nssConfigDir + SEP + customConfigName;
     }
 
     // Generate a vector of supported elliptic curves of a given provider
@@ -727,7 +714,7 @@ public abstract class PKCS11Test {
         return data;
     }
 
-    private static Path fetchNssLib(String osId, Path libraryName) {
+    private static Path fetchNssLib(String osId, Path libraryName) throws IOException {
         switch (osId) {
             case "Windows-amd64-64":
                 return fetchNssLib(WINDOWS_X64.class, libraryName);
@@ -752,28 +739,18 @@ public abstract class PKCS11Test {
                     return fetchNssLib(LINUX_AARCH64.class, libraryName);
                 }
             default:
-                return null;
+                throw new SkippedException("Unsupported OS: " + osId);
         }
     }
 
-    private static Path fetchNssLib(Class<?> clazz, Path libraryName) {
-        Path path = null;
+    private static Path fetchNssLib(Class<?> clazz, Path libraryName) throws IOException {
+        Path p;
         try {
-            Path p = ArtifactResolver.resolve(clazz).entrySet().stream()
-                    .findAny().get().getValue();
-            path = findNSSLibrary(p, libraryName);
-        } catch (ArtifactResolverException | IOException e) {
-            Throwable cause = e.getCause();
-            if (cause == null) {
-                System.out.println("Cannot resolve artifact, "
-                        + "please check if JIB jar is present in classpath.");
-            } else {
-                throw new RuntimeException("Fetch artifact failed: " + clazz
-                        + "\nPlease make sure the artifact is available.", e);
-            }
+            p = ArtifactResolver.fetchOne(clazz);
+        } catch (IOException exc) {
+            throw new SkippedException("Could not find NSS", exc);
         }
-        Policy.setPolicy(null); // Clear the policy created by JIB if any
-        return path;
+        return findNSSLibrary(p, libraryName);
     }
 
     private static Path findNSSLibrary(Path path, Path libraryName) throws IOException {
@@ -781,9 +758,34 @@ public abstract class PKCS11Test {
                 (tp, attr) -> tp.getFileName().equals(libraryName))) {
 
             return files.findAny()
-                        .orElseThrow(() -> new SkippedException(
-                        "NSS library \"" + libraryName + "\" was not found in " + path));
+                        .orElseThrow(() ->
+                            new RuntimeException("NSS library \"" + libraryName + "\" was not found in " + path));
         }
+    }
+
+    //Copy the nss config files to the current directory for tests. Returns the destination path
+    private static String copyNssFiles() throws Exception {
+        String nss = "nss";
+        String db = "db";
+        Path nssDirSource = Path.of(getBase()).resolve(nss);
+        Path nssDirDestination = Path.of(".").resolve(nss);
+
+        // copy files from nss directory
+        copyFiles(nssDirSource, nssDirDestination);
+        // copy files from nss/db directory
+        copyFiles(nssDirSource.resolve(db), nssDirDestination.resolve(db));
+        return nssDirDestination.toString();
+    }
+
+    private static void copyFiles(Path dirSource, Path dirDestination) throws IOException {
+        List<Path> sourceFiles = Arrays
+                .stream(dirSource.toFile().listFiles())
+                .filter(File::isFile)
+                .map(File::toPath)
+                .collect(Collectors.toList());
+        List<Path> destFiles = Utils.copyFiles(sourceFiles, dirDestination,
+                StandardCopyOption.REPLACE_EXISTING);
+        destFiles.forEach((Path file) -> file.toFile().setWritable(true));
     }
 
     public abstract void main(Provider p) throws Exception;
@@ -794,7 +796,7 @@ public abstract class PKCS11Test {
 
     private void premain(Provider p) throws Exception {
         if (skipTest(p)) {
-            return;
+            throw new SkippedException("See logs for details");
         }
 
         // set a security manager and policy before a test case runs,

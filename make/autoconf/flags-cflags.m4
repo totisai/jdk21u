@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, 2024, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2025, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -396,7 +396,7 @@ AC_DEFUN([FLAGS_SETUP_OPTIMIZATION],
     C_O_FLAG_DEBUG="-Od"
     C_O_FLAG_DEBUG_JVM=""
     C_O_FLAG_NONE="-Od"
-    C_O_FLAG_SIZE="-Os"
+    C_O_FLAG_SIZE="-O1"
   fi
 
   # Now copy to C++ flags
@@ -642,8 +642,8 @@ AC_DEFUN([FLAGS_SETUP_CFLAGS_HELPER],
     TOOLCHAIN_CFLAGS_JVM="-qtbtable=full -qtune=balanced -fno-exceptions \
         -qalias=noansi -qstrict -qtls=default -qnortti -qnoeh -qignerrno -qstackprotect"
   elif test "x$TOOLCHAIN_TYPE" = xmicrosoft; then
-    TOOLCHAIN_CFLAGS_JVM="-nologo -MD -Zc:preprocessor -Zc:strictStrings -MP"
-    TOOLCHAIN_CFLAGS_JDK="-nologo -MD -Zc:preprocessor -Zc:strictStrings -Zc:wchar_t-"
+    TOOLCHAIN_CFLAGS_JVM="-nologo -MD -Zc:preprocessor -Zc:throwingNew -permissive- -MP"
+    TOOLCHAIN_CFLAGS_JDK="-nologo -MD -Zc:preprocessor -Zc:throwingNew -permissive- -Zc:wchar_t-"
   fi
 
   # CFLAGS C language level for JDK sources (hotspot only uses C++)
@@ -852,6 +852,11 @@ AC_DEFUN([FLAGS_SETUP_CFLAGS_CPU_DEP],
         # for all archs except arm and ppc, prevent gcc to omit frame pointer
         $1_CFLAGS_CPU_JDK="${$1_CFLAGS_CPU_JDK} -fno-omit-frame-pointer"
       fi
+      if test "x$FLAGS_CPU" = xppc64le; then
+        # Little endian machine uses ELFv2 ABI.
+        # Use Power8, this is the first CPU to support PPC64 LE with ELFv2 ABI.
+        $1_CFLAGS_CPU_JVM="${$1_CFLAGS_CPU_JVM} -DABI_ELFv2 -mcpu=power8 -mtune=power8"
+      fi
     fi
     if test "x$OPENJDK_TARGET_OS" = xaix; then
       $1_CFLAGS_CPU="-mcpu=pwr8"
@@ -879,15 +884,6 @@ AC_DEFUN([FLAGS_SETUP_CFLAGS_CPU_DEP],
     $1_TOOLCHAIN_CFLAGS="${$1_GCC6_CFLAGS}"
 
     $1_WARNING_CFLAGS_JVM="-Wno-format-zero-length -Wtype-limits -Wuninitialized"
-  elif test "x$TOOLCHAIN_TYPE" = xclang; then
-    NO_DELETE_NULL_POINTER_CHECKS_CFLAG="-fno-delete-null-pointer-checks"
-    FLAGS_COMPILER_CHECK_ARGUMENTS(ARGUMENT: [$NO_DELETE_NULL_POINTER_CHECKS_CFLAG],
-        PREFIX: $3,
-        IF_FALSE: [
-            NO_DELETE_NULL_POINTER_CHECKS_CFLAG=
-        ]
-    )
-    $1_TOOLCHAIN_CFLAGS="${NO_DELETE_NULL_POINTER_CHECKS_CFLAG}"
   fi
 
   if test "x$TOOLCHAIN_TYPE" = xmicrosoft; then
@@ -1025,17 +1021,12 @@ AC_DEFUN([FLAGS_SETUP_CFLAGS_CPU_DEP],
 # $2 - Prefix for compiler variables (either BUILD_ or nothing).
 AC_DEFUN([FLAGS_SETUP_GCC6_COMPILER_FLAGS],
 [
-  # These flags are required for GCC 6 builds as undefined behavior in OpenJDK code
-  # runs afoul of the more aggressive versions of these optimizations.
-  # Notably, value range propagation now assumes that the this pointer of C++
-  # member functions is non-null.
-  NO_DELETE_NULL_POINTER_CHECKS_CFLAG="-fno-delete-null-pointer-checks"
-  FLAGS_COMPILER_CHECK_ARGUMENTS(ARGUMENT: [$NO_DELETE_NULL_POINTER_CHECKS_CFLAG],
-      PREFIX: $2, IF_FALSE: [NO_DELETE_NULL_POINTER_CHECKS_CFLAG=""])
+  # This flag is required for GCC 6 builds as undefined behavior in OpenJDK code
+  # runs afoul of the more aggressive versions of this optimization.
   NO_LIFETIME_DSE_CFLAG="-fno-lifetime-dse"
   FLAGS_COMPILER_CHECK_ARGUMENTS(ARGUMENT: [$NO_LIFETIME_DSE_CFLAG],
       PREFIX: $2, IF_FALSE: [NO_LIFETIME_DSE_CFLAG=""])
-  $1_GCC6_CFLAGS="${NO_DELETE_NULL_POINTER_CHECKS_CFLAG} ${NO_LIFETIME_DSE_CFLAG}"
+  $1_GCC6_CFLAGS="${NO_LIFETIME_DSE_CFLAG}"
 ])
 
 AC_DEFUN_ONCE([FLAGS_SETUP_BRANCH_PROTECTION],

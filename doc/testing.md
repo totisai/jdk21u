@@ -498,6 +498,10 @@ Defaults to 0.
 Use this report style when reporting test results (sent to JTReg as `-report`).
 Defaults to `files`.
 
+#### MANUAL
+
+Set to `true` to execute manual tests only.
+
 ### Gtest keywords
 
 #### REPEAT
@@ -614,6 +618,15 @@ $ make test TEST="jtreg:sun/security/pkcs11/Secmod/AddTrustedCert.java" \
 
 For more notes about the PKCS11 tests, please refer to
 test/jdk/sun/security/pkcs11/README.
+
+### Testing with alternative security providers
+
+Some security tests use a hardcoded provider for `KeyFactory`, `Cipher`,
+`KeyPairGenerator`, `KeyGenerator`, `AlgorithmParameterGenerator`,
+`KeyAgreement`, `Mac`, `MessageDigest`, `SecureRandom`, `Signature`,
+`AlgorithmParameters`, `Configuration`, `Policy`, or `SecretKeyFactory` objects.
+Specify the `-Dtest.provider.name=NAME` property to use a different provider for
+the service(s).
 
 ### Client UI Tests
 

@@ -38,11 +38,18 @@ class os::win32 {
   friend class os;
 
  protected:
-  static int    _processor_type;
-  static int    _processor_level;
-  static julong _physical_memory;
-  static bool   _is_windows_server;
-  static bool   _has_exit_bug;
+  static int                       _processor_type;
+  static int                       _processor_level;
+  static physical_memory_size_type _physical_memory;
+  static bool                      _is_windows_server;
+  static bool                      _has_exit_bug;
+  static bool                      _processor_group_warning_displayed;
+  static bool                      _job_object_processor_group_warning_displayed;
+
+  static int                       _major_version;
+  static int                       _minor_version;
+  static int                       _build_number;
+  static int                       _build_minor;
 
   static void print_windows_version(outputStream* st);
   static void print_uptime_info(outputStream* st);
@@ -56,15 +63,48 @@ class os::win32 {
   // Windows-specific interface:
   static void   initialize_system_info();
   static void   setmode_streams();
+  static bool   is_windows_11_or_greater();
+  static bool   is_windows_server_2022_or_greater();
+  static bool   request_lock_memory_privilege();
+  static size_t large_page_init_decide_size();
+  static int windows_major_version() {
+    assert(_major_version > 0, "windows version not initialized.");
+    return _major_version;
+  }
+  static int windows_minor_version() {
+    assert(_major_version > 0, "windows version not initialized.");
+    return _minor_version;
+  }
+  static int windows_build_number() {
+    assert(_major_version > 0, "windows version not initialized.");
+    return _build_number;
+  }
+  static int windows_build_minor() {
+    assert(_major_version > 0, "windows version not initialized.");
+    return _build_minor;
+  }
+
+  static void set_processor_group_warning_displayed(bool displayed)  {
+    _processor_group_warning_displayed = displayed;
+  }
+  static bool processor_group_warning_displayed() {
+    return _processor_group_warning_displayed;
+  }
+  static void set_job_object_processor_group_warning_displayed(bool displayed)  {
+    _job_object_processor_group_warning_displayed = displayed;
+  }
+  static bool job_object_processor_group_warning_displayed() {
+    return _job_object_processor_group_warning_displayed;
+  }
 
   // Processor info as provided by NT
   static int processor_type()  { return _processor_type;  }
   static int processor_level() {
     return _processor_level;
   }
-  static julong available_memory();
-  static julong free_memory();
-  static julong physical_memory() { return _physical_memory; }
+  static bool available_memory(physical_memory_size_type& value);
+  static bool free_memory(physical_memory_size_type& value);
+  static physical_memory_size_type physical_memory() { return _physical_memory; }
 
   // load dll from Windows system directory or Windows directory
   static HINSTANCE load_Windows_dll(const char* name, char *ebuf, int ebuflen);
@@ -79,6 +119,8 @@ class os::win32 {
   static int exit_process_or_thread(Ept what, int exit_code);
 
   static void initialize_performance_counter();
+  static void initialize_windows_version();
+  static DWORD active_processors_in_job_object(DWORD* active_processor_groups = nullptr);
 
  public:
   // Generic interface:

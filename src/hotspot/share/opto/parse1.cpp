@@ -1170,6 +1170,13 @@ SafePointNode* Parse::create_entry_map() {
   // Create an initial safepoint to hold JVM state during parsing
   JVMState* jvms = new (C) JVMState(method(), _caller->has_method() ? _caller : nullptr);
   set_map(new SafePointNode(len, jvms));
+
+  // Capture receiver info for compiled lambda forms.
+  if (method()->is_compiled_lambda_form()) {
+    ciInstance* recv_info = _caller->compute_receiver_info(method());
+    jvms->set_receiver_info(recv_info);
+  }
+
   jvms->set_map(map());
   record_for_igvn(map());
   assert(jvms->endoff() == len, "correct jvms sizing");
@@ -1655,7 +1662,7 @@ void Parse::merge_new_path(int target_bci) {
 // The ex_oop must be pushed on the stack, unlike throw_to_exit.
 void Parse::merge_exception(int target_bci) {
 #ifdef ASSERT
-  if (target_bci < bci()) {
+  if (target_bci <= bci()) {
     C->set_exception_backedge();
   }
 #endif

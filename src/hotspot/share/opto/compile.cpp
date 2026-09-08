@@ -748,19 +748,9 @@ Compile::Compile( ciEnv* ci_env, ciMethod* target, int osr_bci,
       StartNode* s = new StartNode(root(), tf()->domain());
       initial_gvn()->set_type_bottom(s);
       init_start(s);
-      if (method()->intrinsic_id() == vmIntrinsics::_Reference_get) {
-        // With java.lang.ref.reference.get() we must go through the
-        // intrinsic - even when get() is the root
-        // method of the compile - so that, if necessary, the value in
-        // the referent field of the reference object gets recorded by
-        // the pre-barrier code.
-        cg = find_intrinsic(method(), false);
-      }
-      if (cg == nullptr) {
-        float past_uses = method()->interpreter_invocation_count();
-        float expected_uses = past_uses;
-        cg = CallGenerator::for_inline(method(), expected_uses);
-      }
+      float past_uses = method()->interpreter_invocation_count();
+      float expected_uses = past_uses;
+      cg = CallGenerator::for_inline(method(), expected_uses);
     }
     if (failing())  return;
     if (cg == nullptr) {
@@ -833,18 +823,8 @@ Compile::Compile( ciEnv* ci_env, ciMethod* target, int osr_bci,
   if (failing())  return;
   NOT_PRODUCT( verify_graph_edges(); )
 
-  // If any phase is randomized for stress testing, seed random number
-  // generation and log the seed for repeatability.
   if (StressLCM || StressGCM || StressIGVN || StressCCP || StressIncrementalInlining) {
-    if (FLAG_IS_DEFAULT(StressSeed) || (FLAG_IS_ERGO(StressSeed) && directive->RepeatCompilationOption)) {
-      _stress_seed = static_cast<uint>(Ticks::now().nanoseconds());
-      FLAG_SET_ERGO(StressSeed, _stress_seed);
-    } else {
-      _stress_seed = StressSeed;
-    }
-    if (_log != nullptr) {
-      _log->elem("stress_test seed='%u'", _stress_seed);
-    }
+    initialize_stress_seed(directive);
   }
 
   // Now optimize
@@ -965,6 +945,11 @@ Compile::Compile( ciEnv* ci_env,
   _igvn_worklist = new (comp_arena()) Unique_Node_List(comp_arena());
   _types = new (comp_arena()) Type_Array(comp_arena());
   _node_hash = new (comp_arena()) NodeHash(comp_arena(), 255);
+
+  if (StressLCM || StressGCM) {
+    initialize_stress_seed(directive);
+  }
+
   {
     PhaseGVN gvn;
     set_initial_gvn(&gvn);    // not significant, but GraphKit guys use it pervasively
@@ -1461,12 +1446,18 @@ const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
     } else {
       ciInstanceKlass *canonical_holder = ik->get_canonical_holder(offset);
       assert(offset < canonical_holder->layout_helper_size_in_bytes(), "");
-      if (!ik->equals(canonical_holder) || tj->offset() != offset) {
-        if( is_known_inst ) {
-          tj = to = TypeInstPtr::make(to->ptr(), canonical_holder, true, nullptr, offset, to->instance_id());
-        } else {
-          tj = to = TypeInstPtr::make(to->ptr(), canonical_holder, false, nullptr, offset);
-        }
+      assert(tj->offset() == offset, "no change to offset expected");
+      bool xk = to->klass_is_exact();
+      int instance_id = to->instance_id();
+
+      // If the input type's class is the holder: if exact, the type only includes interfaces implemented by the holder
+      // but if not exact, it may include extra interfaces: build new type from the holder class to make sure only
+      // its interfaces are included.
+      if (xk && ik->equals(canonical_holder)) {
+        assert(tj == TypeInstPtr::make(to->ptr(), canonical_holder, is_known_inst, nullptr, offset, instance_id), "exact type should be canonical type");
+      } else {
+        assert(xk || !is_known_inst, "Known instance should be exact type");
+        tj = to = TypeInstPtr::make(to->ptr(), canonical_holder, is_known_inst, nullptr, offset, instance_id);
       }
     }
   }
@@ -2992,9 +2983,8 @@ void Compile::Code_Gen() {
     output.Output();
     if (failing())  return;
     output.install();
+    print_method(PHASE_FINAL_CODE, 1); // Compile::_output is not null here
   }
-
-  print_method(PHASE_FINAL_CODE, 1);
 
   // He's dead, Jim.
   _cfg     = (PhaseCFG*)((intptr_t)0xdeadbeef);
@@ -3303,8 +3293,8 @@ void Compile::final_graph_reshaping_main_switch(Node* n, Final_Reshape_Counts& f
       bool is_oop   = t->isa_oopptr() != nullptr;
       bool is_klass = t->isa_klassptr() != nullptr;
 
-      if ((is_oop   && Matcher::const_oop_prefer_decode()  ) ||
-          (is_klass && Matcher::const_klass_prefer_decode())) {
+      if ((is_oop   && UseCompressedOops          && Matcher::const_oop_prefer_decode()  ) ||
+          (is_klass && UseCompressedClassPointers && Matcher::const_klass_prefer_decode())) {
         Node* nn = nullptr;
 
         int op = is_oop ? Op_ConN : Op_ConNKlass;
@@ -4956,16 +4946,7 @@ void Compile::remove_speculative_types(PhaseIterGVN &igvn) {
         const Type* t_no_spec = t->remove_speculative();
         if (t_no_spec != t) {
           bool in_hash = igvn.hash_delete(n);
-#ifdef ASSERT
-          if (!in_hash) {
-            tty->print_cr("current graph:");
-            n->dump_bfs(MaxNodeLimit, nullptr, "S$");
-            tty->cr();
-            tty->print_cr("erroneous node:");
-            n->dump();
-            assert(false, "node should be in igvn hash table");
-          }
-#endif
+          assert(in_hash || n->hash() == Node::NO_HASH, "node should be in igvn hash table");
           tn->set_type(t_no_spec);
           igvn.hash_insert(n);
           igvn._worklist.push(n); // give it a chance to go away
@@ -5014,6 +4995,18 @@ void Compile::remove_speculative_types(PhaseIterGVN &igvn) {
 }
 
 // Auxiliary methods to support randomized stressing/fuzzing.
+
+void Compile::initialize_stress_seed(const DirectiveSet* directive) {
+  if (FLAG_IS_DEFAULT(StressSeed) || (FLAG_IS_ERGO(StressSeed) && directive->RepeatCompilationOption)) {
+    _stress_seed = static_cast<uint>(Ticks::now().nanoseconds());
+    FLAG_SET_ERGO(StressSeed, _stress_seed);
+  } else {
+    _stress_seed = StressSeed;
+  }
+  if (_log != nullptr) {
+    _log->elem("stress_test seed='%u'", _stress_seed);
+  }
+}
 
 int Compile::random() {
   _stress_seed = os::next_random(_stress_seed);

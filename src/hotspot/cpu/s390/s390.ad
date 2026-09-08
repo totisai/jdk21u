@@ -2641,7 +2641,7 @@ operand uimmI5() %{
 //   operand type int
 // Unsigned Integer Immediate: 9-bit
 operand SSlenDW() %{
-  predicate(Immediate::is_uimm8(n->get_long()-1));
+  predicate(Immediate::is_uimm8((julong)n->get_long()-1));
   match(ConL);
   op_cost(1);
   format %{ %}
@@ -10177,7 +10177,7 @@ instruct string_compress(iRegP src, iRegP dst, iRegI result, iRegI len, iRegI tm
   format %{ "String Compress $src->$dst($len) -> $result" %}
   ins_encode %{
     __ string_compress($result$$Register, $src$$Register, $dst$$Register, $len$$Register,
-                       $tmp$$Register, false, false);
+                       $tmp$$Register, true, false);
   %}
   ins_pipe(pipe_class_dummy);
 %}

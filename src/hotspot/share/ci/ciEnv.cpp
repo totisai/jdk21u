@@ -1230,6 +1230,15 @@ int ciEnv::num_inlined_bytecodes() const {
 // ------------------------------------------------------------------
 // ciEnv::record_failure()
 void ciEnv::record_failure(const char* reason) {
+  // record the bailout for hserr envlog
+  if (reason != nullptr) {
+    if (CompilationLog::log() != nullptr) {
+      CompilerThread* thread = CompilerThread::current();
+      CompileTask* task = thread->task();
+      CompilationLog::log()->log_failure(thread, task, reason, nullptr);
+    }
+  }
+
   if (_failure_reason.get() == nullptr) {
     // Record the first failure reason.
     _failure_reason.set(reason);
@@ -1655,6 +1664,8 @@ void ciEnv::dump_replay_data_helper(outputStream* out) {
   NoSafepointVerifier no_safepoint;
   ResourceMark rm;
 
+  assert(this->task() != nullptr, "task must not be null");
+
   dump_replay_data_version(out);
 #if INCLUDE_JVMTI
   out->print_cr("JvmtiExport can_access_local_variables %d",     _jvmti_can_access_local_variables);
@@ -1674,6 +1685,7 @@ void ciEnv::dump_replay_data_helper(outputStream* out) {
   for (int i = 0; i < objects->length(); i++) {
     objects->at(i)->dump_replay_data(out);
   }
+
   dump_compile_data(out);
   out->flush();
 }

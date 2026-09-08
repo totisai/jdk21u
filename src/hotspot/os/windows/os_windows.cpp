@@ -76,6 +76,7 @@
 #include "utilities/defaultStream.hpp"
 #include "utilities/events.hpp"
 #include "utilities/macros.hpp"
+#include "utilities/population_count.hpp"
 #include "utilities/vmError.hpp"
 #include "windbghelp.hpp"
 #if INCLUDE_JFR
@@ -831,25 +832,30 @@ jlong os::elapsed_frequency() {
 }
 
 
-julong os::available_memory() {
-  return win32::available_memory();
+bool os::available_memory(physical_memory_size_type& value) {
+  return win32::available_memory(value);
 }
 
-julong os::free_memory() {
-  return win32::available_memory();
+bool os::free_memory(physical_memory_size_type& value) {
+  return win32::available_memory(value);
 }
 
-julong os::win32::available_memory() {
+bool os::win32::available_memory(physical_memory_size_type& value) {
   // Use GlobalMemoryStatusEx() because GlobalMemoryStatus() may return incorrect
   // value if total memory is larger than 4GB
   MEMORYSTATUSEX ms;
   ms.dwLength = sizeof(ms);
-  GlobalMemoryStatusEx(&ms);
-
-  return (julong)ms.ullAvailPhys;
+  BOOL res = GlobalMemoryStatusEx(&ms);
+  if (res == TRUE) {
+    value = static_cast<physical_memory_size_type>(ms.ullAvailPhys);
+    return true;
+  } else {
+    assert(false, "GlobalMemoryStatusEx failed in os::win32::available_memory(): %lu", ::GetLastError());
+    return false;
+  }
 }
 
-julong os::physical_memory() {
+physical_memory_size_type os::physical_memory() {
   return win32::physical_memory();
 }
 
@@ -876,21 +882,119 @@ int os::active_processor_count() {
     return ActiveProcessorCount;
   }
 
-  DWORD_PTR lpProcessAffinityMask = 0;
-  DWORD_PTR lpSystemAffinityMask = 0;
-  int proc_count = processor_count();
-  if (proc_count <= sizeof(UINT_PTR) * BitsPerByte &&
-      GetProcessAffinityMask(GetCurrentProcess(), &lpProcessAffinityMask, &lpSystemAffinityMask)) {
-    // Nof active processors is number of bits in process affinity mask
-    int bitcount = 0;
-    while (lpProcessAffinityMask != 0) {
-      lpProcessAffinityMask = lpProcessAffinityMask & (lpProcessAffinityMask-1);
-      bitcount++;
-    }
-    return bitcount;
-  } else {
-    return proc_count;
+  bool schedules_all_processor_groups = win32::is_windows_11_or_greater() || win32::is_windows_server_2022_or_greater();
+  if (UseAllWindowsProcessorGroups && !schedules_all_processor_groups && !win32::processor_group_warning_displayed()) {
+    win32::set_processor_group_warning_displayed(true);
+    FLAG_SET_DEFAULT(UseAllWindowsProcessorGroups, false);
+    warning("The UseAllWindowsProcessorGroups flag is not supported on this Windows version and will be ignored.");
   }
+
+  DWORD active_processor_groups = 0;
+  DWORD processors_in_job_object = win32::active_processors_in_job_object(&active_processor_groups);
+
+  if (processors_in_job_object > 0) {
+    if (schedules_all_processor_groups) {
+      // If UseAllWindowsProcessorGroups is enabled then all the processors in the job object
+      // can be used. Otherwise, we will fall through to inspecting the process affinity mask.
+      // This will result in using only the subset of the processors in the default processor
+      // group allowed by the job object i.e. only 1 processor group will be used and only
+      // the processors in that group that are allowed by the job object will be used.
+      // This preserves the behavior where older OpenJDK versions always used one processor
+      // group regardless of whether they were launched in a job object.
+      if (!UseAllWindowsProcessorGroups && active_processor_groups > 1) {
+        if (!win32::job_object_processor_group_warning_displayed()) {
+          win32::set_job_object_processor_group_warning_displayed(true);
+          warning("The Windows job object has enabled multiple processor groups (%d) but the UseAllWindowsProcessorGroups flag is off. Some processors might not be used.", active_processor_groups);
+        }
+      } else {
+        return processors_in_job_object;
+      }
+    } else {
+      if (active_processor_groups > 1 && !win32::job_object_processor_group_warning_displayed()) {
+        win32::set_job_object_processor_group_warning_displayed(true);
+        warning("The Windows job object has enabled multiple processor groups (%d) but only 1 is supported on this Windows version. Some processors might not be used.", active_processor_groups);
+      }
+      return processors_in_job_object;
+    }
+  }
+
+  DWORD logical_processors = 0;
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+
+  USHORT group_count = 0;
+  bool use_process_affinity_mask = false;
+  bool got_process_group_affinity = false;
+
+  if (GetProcessGroupAffinity(GetCurrentProcess(), &group_count, nullptr) == 0) {
+    DWORD last_error = GetLastError();
+    if (last_error == ERROR_INSUFFICIENT_BUFFER) {
+      if (group_count > 0) {
+        got_process_group_affinity = true;
+
+        if (group_count == 1) {
+          use_process_affinity_mask = true;
+        }
+      } else {
+        warning("Unexpected group count of 0 from GetProcessGroupAffinity.");
+        assert(false, "Group count must not be 0.");
+      }
+    } else {
+      char buf[512];
+      size_t buf_len = os::lasterror(buf, sizeof(buf));
+      warning("Attempt to get process group affinity failed: %s", buf_len != 0 ? buf : "<unknown error>");
+    }
+  } else {
+    warning("Unexpected GetProcessGroupAffinity success result.");
+    assert(false, "Unexpected GetProcessGroupAffinity success result");
+  }
+
+  // Fall back to SYSTEM_INFO.dwNumberOfProcessors if the process group affinity could not be determined.
+  if (!got_process_group_affinity) {
+    return si.dwNumberOfProcessors;
+  }
+
+  // If the process it not in a job and the process group affinity is exactly 1 group
+  // then get the number of available logical processors from the process affinity mask
+  if (use_process_affinity_mask) {
+    DWORD_PTR lpProcessAffinityMask = 0;
+    DWORD_PTR lpSystemAffinityMask = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &lpProcessAffinityMask, &lpSystemAffinityMask) != 0) {
+      // Number of active processors is number of bits in process affinity mask
+      logical_processors = population_count(lpProcessAffinityMask);
+
+      if (logical_processors > 0) {
+        return logical_processors;
+      } else {
+        // We only check the process affinity mask if GetProcessGroupAffinity determined that there was
+        // only 1 active group. In this case, GetProcessAffinityMask will not set the affinity mask to 0.
+        warning("Unexpected process affinity mask of 0 from GetProcessAffinityMask.");
+        assert(false, "Found unexpected process affinity mask: 0");
+      }
+    } else {
+      char buf[512];
+      size_t buf_len = os::lasterror(buf, sizeof(buf));
+      warning("Attempt to get the process affinity mask failed: %s", buf_len != 0 ? buf : "<unknown error>");
+    }
+
+    // Fall back to SYSTEM_INFO.dwNumberOfProcessors if the process affinity mask could not be determined.
+    return si.dwNumberOfProcessors;
+  }
+
+  if (UseAllWindowsProcessorGroups) {
+    // There are no processor affinity restrictions at this point so we can return
+    // the overall processor count if the OS automatically schedules threads across
+    // all processors on the system. Note that older operating systems can
+    // correctly report processor count but will not schedule threads across
+    // processor groups unless the application explicitly uses group affinity APIs
+    // to assign threads to processor groups. On these older operating systems, we
+    // will continue to use the dwNumberOfProcessors field.
+    if (schedules_all_processor_groups) {
+      logical_processors = processor_count();
+    }
+  }
+
+  return logical_processors == 0 ? si.dwNumberOfProcessors : logical_processors;
 }
 
 uint os::processor_id() {
@@ -1170,38 +1274,50 @@ void os::shutdown() {
 
 static HANDLE dumpFile = nullptr;
 
-// Check if dump file can be created.
-void os::check_dump_limit(char* buffer, size_t buffsz) {
-  bool status = true;
+// Check if core dump is active and if a core dump file can be created
+void os::check_core_dump_prerequisites(char* buffer, size_t bufferSize, bool check_only) {
   if (!FLAG_IS_DEFAULT(CreateCoredumpOnCrash) && !CreateCoredumpOnCrash) {
-    jio_snprintf(buffer, buffsz, "CreateCoredumpOnCrash is disabled from command line");
-    status = false;
-  }
-
+    jio_snprintf(buffer, bufferSize, "CreateCoredumpOnCrash is disabled from command line");
+    VMError::record_coredump_status(buffer, false);
+  } else {
+    bool success = true;
+    bool warn = true;
 #ifndef ASSERT
-  if (!os::win32::is_windows_server() && FLAG_IS_DEFAULT(CreateCoredumpOnCrash)) {
-    jio_snprintf(buffer, buffsz, "Minidumps are not enabled by default on client versions of Windows");
-    status = false;
-  }
+    if (!os::win32::is_windows_server() && FLAG_IS_DEFAULT(CreateCoredumpOnCrash)) {
+      jio_snprintf(buffer, bufferSize, "Minidumps are not enabled by default on client versions of Windows");
+      success = false;
+      warn = true;
+    }
 #endif
 
-  if (status) {
-    const char* cwd = get_current_directory(nullptr, 0);
-    int pid = current_process_id();
-    if (cwd != nullptr) {
-      jio_snprintf(buffer, buffsz, "%s\\hs_err_pid%u.mdmp", cwd, pid);
-    } else {
-      jio_snprintf(buffer, buffsz, ".\\hs_err_pid%u.mdmp", pid);
+    if (success) {
+      if (!check_only) {
+        const char* cwd = get_current_directory(nullptr, 0);
+        int pid = current_process_id();
+        if (cwd != nullptr) {
+          jio_snprintf(buffer, bufferSize, "%s\\hs_err_pid%u.mdmp", cwd, pid);
+        } else {
+          jio_snprintf(buffer, bufferSize, ".\\hs_err_pid%u.mdmp", pid);
+        }
+
+        if (dumpFile == nullptr &&
+            (dumpFile = CreateFile(buffer, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr))
+            == INVALID_HANDLE_VALUE) {
+          jio_snprintf(buffer, bufferSize, "Failed to create minidump file (0x%x).", GetLastError());
+          success = false;
+        }
+      } else {
+        // For now on Windows, there are no more checks that we can do
+        warn = false;
+      }
     }
 
-    if (dumpFile == nullptr &&
-       (dumpFile = CreateFile(buffer, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr))
-                 == INVALID_HANDLE_VALUE) {
-      jio_snprintf(buffer, buffsz, "Failed to create minidump file (0x%x).", GetLastError());
-      status = false;
+    if (!check_only) {
+      VMError::record_coredump_status(buffer, success);
+    } else if (warn) {
+      warning("CreateCoredumpOnCrash specified, but %s", buffer);
     }
   }
-  VMError::record_coredump_status(buffer, status);
 }
 
 void os::abort(bool dump_core, void* siginfo, const void* context) {
@@ -1533,6 +1649,7 @@ static int _print_module(const char* fname, address base_address,
 // same architecture as Hotspot is running on
 void * os::dll_load(const char *name, char *ebuf, int ebuflen) {
   log_info(os)("attempting shared library load of %s", name);
+  Events::log_dll_message(nullptr, "Attempting to load shared library %s", name);
 
   void * result = LoadLibrary(name);
   if (result != nullptr) {
@@ -1764,52 +1881,13 @@ void os::print_os_info(outputStream* st) {
 }
 
 void os::win32::print_windows_version(outputStream* st) {
-  VS_FIXEDFILEINFO *file_info;
-  TCHAR kernel32_path[MAX_PATH];
-  UINT len, ret;
-
   bool is_workstation = !IsWindowsServer();
 
-  // Get the full path to \Windows\System32\kernel32.dll and use that for
-  // determining what version of Windows we're running on.
-  len = MAX_PATH - (UINT)strlen("\\kernel32.dll") - 1;
-  ret = GetSystemDirectory(kernel32_path, len);
-  if (ret == 0 || ret > len) {
-    st->print_cr("Call to GetSystemDirectory failed");
-    return;
-  }
-  strncat(kernel32_path, "\\kernel32.dll", MAX_PATH - ret);
-
-  DWORD version_size = GetFileVersionInfoSize(kernel32_path, nullptr);
-  if (version_size == 0) {
-    st->print_cr("Call to GetFileVersionInfoSize failed");
-    return;
-  }
-
-  LPTSTR version_info = (LPTSTR)os::malloc(version_size, mtInternal);
-  if (version_info == nullptr) {
-    st->print_cr("Failed to allocate version_info");
-    return;
-  }
-
-  if (!GetFileVersionInfo(kernel32_path, 0, version_size, version_info)) {
-    os::free(version_info);
-    st->print_cr("Call to GetFileVersionInfo failed");
-    return;
-  }
-
-  if (!VerQueryValue(version_info, TEXT("\\"), (LPVOID*)&file_info, &len)) {
-    os::free(version_info);
-    st->print_cr("Call to VerQueryValue failed");
-    return;
-  }
-
-  int major_version = HIWORD(file_info->dwProductVersionMS);
-  int minor_version = LOWORD(file_info->dwProductVersionMS);
-  int build_number = HIWORD(file_info->dwProductVersionLS);
-  int build_minor = LOWORD(file_info->dwProductVersionLS);
+  int major_version = windows_major_version();
+  int minor_version = windows_minor_version();
+  int build_number = windows_build_number();
+  int build_minor = windows_build_minor();
   int os_vers = major_version * 1000 + minor_version;
-  os::free(version_info);
 
   st->print(" Windows ");
   switch (os_vers) {
@@ -1858,7 +1936,10 @@ void os::win32::print_windows_version(outputStream* st) {
       // - 2016 GA 10/2016 build: 14393
       // - 2019 GA 11/2018 build: 17763
       // - 2022 GA 08/2021 build: 20348
-      if (build_number > 20347) {
+      // - 2025 Preview build   : 26040
+      if (build_number > 26039) {
+        st->print("Server 2025");
+      } else if (build_number > 20347) {
         st->print("Server 2022");
       } else if (build_number > 17762) {
         st->print("Server 2019");
@@ -1905,6 +1986,12 @@ void os::pd_print_cpu_info(outputStream* st, char* buf, size_t buflen) {
   if (proc_count < 1) {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
+
+    // This is the number of logical processors in the current processor group only and is therefore
+    // at most 64. The GetLogicalProcessorInformation function is used to compute the total number
+    // of processors. However, it requires memory to be allocated for the processor information buffer.
+    // Since this method is used in paths where memory allocation should not be done (i.e. after a crash),
+    // only the number of processors in the current group will be returned.
     proc_count = si.dwNumberOfProcessors;
   }
 
@@ -1934,7 +2021,7 @@ void os::pd_print_cpu_info(outputStream* st, char* buf, size_t buflen) {
     }
 
     if (same_vals_for_all_cpus && max_mhz != -1) {
-      st->print_cr("Processor Information for all %d processors :", proc_count);
+      st->print_cr("Processor Information for the first %d processors :", proc_count);
       st->print_cr("  Max Mhz: %d, Current Mhz: %d, Mhz Limit: %d", max_mhz, current_mhz, mhz_limit);
       return;
     }
@@ -2215,7 +2302,7 @@ void* os::win32::install_signal_handler(int sig, signal_handler_t handler) {
     sigbreakHandler = handler;
     return oldHandler;
   } else {
-    return ::signal(sig, handler);
+    return CAST_FROM_FN_PTR(void*, ::signal(sig, handler));
   }
 }
 
@@ -2866,22 +2953,23 @@ LONG WINAPI topLevelVectoredExceptionFilter(struct _EXCEPTION_POINTERS* exceptio
 
 #if defined(USE_VECTORED_EXCEPTION_HANDLING)
 LONG WINAPI topLevelUnhandledExceptionFilter(struct _EXCEPTION_POINTERS* exceptionInfo) {
-  if (InterceptOSException) goto exit;
-  DWORD exception_code = exceptionInfo->ExceptionRecord->ExceptionCode;
+  if (!InterceptOSException) {
+    DWORD exceptionCode = exceptionInfo->ExceptionRecord->ExceptionCode;
 #if defined(_M_ARM64)
-  address pc = (address)exceptionInfo->ContextRecord->Pc;
+    address pc = (address) exceptionInfo->ContextRecord->Pc;
 #elif defined(_M_AMD64)
-  address pc = (address) exceptionInfo->ContextRecord->Rip;
+    address pc = (address) exceptionInfo->ContextRecord->Rip;
 #else
-  address pc = (address) exceptionInfo->ContextRecord->Eip;
+    address pc = (address) exceptionInfo->ContextRecord->Eip;
 #endif
-  Thread* t = Thread::current_or_null_safe();
+    Thread* thread = Thread::current_or_null_safe();
 
-  if (exception_code != EXCEPTION_BREAKPOINT) {
-    report_error(t, exception_code, pc, exceptionInfo->ExceptionRecord,
-                exceptionInfo->ContextRecord);
+    if (exceptionCode != EXCEPTION_BREAKPOINT) {
+      report_error(thread, exceptionCode, pc, exceptionInfo->ExceptionRecord,
+                  exceptionInfo->ContextRecord);
+    }
   }
-exit:
+
   return previousUnhandledExceptionFilter ? previousUnhandledExceptionFilter(exceptionInfo) : EXCEPTION_CONTINUE_SEARCH;
 }
 #endif
@@ -3016,7 +3104,7 @@ class NUMANodeListHolder {
 
 static size_t _large_page_size = 0;
 
-static bool request_lock_memory_privilege() {
+bool os::win32::request_lock_memory_privilege() {
   HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE,
                                 os::current_process_id());
 
@@ -3200,14 +3288,14 @@ static char* allocate_pages_individually(size_t bytes, char* addr, DWORD flags,
   return p_buf;
 }
 
-static size_t large_page_init_decide_size() {
+size_t os::win32::large_page_init_decide_size() {
   // print a warning if any large page related flag is specified on command line
   bool warn_on_failure = !FLAG_IS_DEFAULT(UseLargePages) ||
                          !FLAG_IS_DEFAULT(LargePageSizeInBytes);
 
-#define WARN(msg) if (warn_on_failure) { warning(msg); }
+#define WARN(...) if (warn_on_failure) { warning(__VA_ARGS__); }
 
-  if (!request_lock_memory_privilege()) {
+  if (!os::win32::request_lock_memory_privilege()) {
     WARN("JVM cannot use large page memory because it does not have enough privilege to lock pages in memory.");
     return 0;
   }
@@ -3218,15 +3306,26 @@ static size_t large_page_init_decide_size() {
     return 0;
   }
 
-#if defined(IA32) || defined(AMD64)
-  if (size > 4*M || LargePageSizeInBytes > 4*M) {
+#if defined(IA32)
+  if (size > 4 * M || LargePageSizeInBytes > 4 * M) {
     WARN("JVM cannot use large pages bigger than 4mb.");
     return 0;
   }
+#elif defined(AMD64)
+  if (!EnableAllLargePageSizesForWindows) {
+    if (size > 4 * M || LargePageSizeInBytes > 4 * M) {
+      WARN("JVM cannot use large pages bigger than 4mb.");
+      return 0;
+    }
+  }
 #endif
 
-  if (LargePageSizeInBytes > 0 && LargePageSizeInBytes % size == 0) {
-    size = LargePageSizeInBytes;
+  if (LargePageSizeInBytes > 0) {
+    if (LargePageSizeInBytes % size == 0) {
+      size = LargePageSizeInBytes;
+    } else {
+      WARN("The specified large page size (%d) is not a multiple of the minimum large page size (%d), defaulting to minimum page size.", LargePageSizeInBytes, size);
+    }
   }
 
 #undef WARN
@@ -3239,12 +3338,23 @@ void os::large_page_init() {
     return;
   }
 
-  _large_page_size = large_page_init_decide_size();
+  _large_page_size = os::win32::large_page_init_decide_size();
   const size_t default_page_size = os::vm_page_size();
   if (_large_page_size > default_page_size) {
+#if !defined(IA32)
+    if (EnableAllLargePageSizesForWindows) {
+      size_t min_size = GetLargePageMinimum();
+
+      // Populate _page_sizes with large page sizes less than or equal to _large_page_size, ensuring each page size is double the size of the previous one.
+      for (size_t page_size = min_size; page_size < _large_page_size; page_size *= 2) {
+        _page_sizes.add(page_size);
+      }
+    }
+#endif
+
     _page_sizes.add(_large_page_size);
   }
-
+  // Set UseLargePages based on whether a large page size was successfully determined
   UseLargePages = _large_page_size != 0;
 }
 
@@ -3354,7 +3464,8 @@ static char* map_or_reserve_memory_aligned(size_t size, size_t alignment, int fi
                                      os::attempt_reserve_memory_at(aligned_base, size);
   }
 
-  assert(aligned_base != nullptr, "Did not manage to re-map after %d attempts?", max_attempts);
+  assert(aligned_base != nullptr,
+      "Did not manage to re-map after %d attempts (size %zu, alignment %zu, file descriptor %d)", max_attempts, size, alignment, file_desc);
 
   return aligned_base;
 }
@@ -3505,7 +3616,6 @@ static char* reserve_large_pages_aligned(size_t size, size_t alignment, bool exe
 char* os::pd_reserve_memory_special(size_t bytes, size_t alignment, size_t page_size, char* addr,
                                     bool exec) {
   assert(UseLargePages, "only for large pages");
-  assert(page_size == os::large_page_size(), "Currently only support one large page size on Windows");
   assert(is_aligned(addr, alignment), "Must be");
   assert(is_aligned(addr, page_size), "Must be");
 
@@ -3514,11 +3624,17 @@ char* os::pd_reserve_memory_special(size_t bytes, size_t alignment, size_t page_
     return nullptr;
   }
 
+  // Ensure GetLargePageMinimum() returns a valid positive value
+  size_t large_page_min = GetLargePageMinimum();
+  if (large_page_min <= 0) {
+    return nullptr;
+  }
+
   // The requested alignment can be larger than the page size, for example with G1
   // the alignment is bound to the heap region size. So this reservation needs to
   // ensure that the requested alignment is met. When there is a requested address
   // this solves it self, since it must be properly aligned already.
-  if (addr == nullptr && alignment > page_size) {
+  if (addr == nullptr && alignment > large_page_min) {
     return reserve_large_pages_aligned(bytes, alignment, exec);
   }
 
@@ -3964,17 +4080,211 @@ int os::current_process_id() {
   return (_initial_pid ? _initial_pid : _getpid());
 }
 
-int    os::win32::_processor_type            = 0;
+int                       os::win32::_processor_type            = 0;
 // Processor level is not available on non-NT systems, use vm_version instead
-int    os::win32::_processor_level           = 0;
-julong os::win32::_physical_memory           = 0;
+int                       os::win32::_processor_level           = 0;
+physical_memory_size_type os::win32::_physical_memory           = 0;
 
-bool   os::win32::_is_windows_server         = false;
+bool                      os::win32::_is_windows_server         = false;
 
 // 6573254
 // Currently, the bug is observed across all the supported Windows releases,
 // including the latest one (as of this writing - Windows Server 2012 R2)
-bool   os::win32::_has_exit_bug              = true;
+bool                      os::win32::_has_exit_bug              = true;
+
+int                       os::win32::_major_version             = 0;
+int                       os::win32::_minor_version             = 0;
+int                       os::win32::_build_number              = 0;
+int                       os::win32::_build_minor               = 0;
+
+bool                      os::win32::_processor_group_warning_displayed = false;
+bool                      os::win32::_job_object_processor_group_warning_displayed = false;
+
+void getWindowsInstallationType(char* buffer, int bufferSize) {
+  HKEY hKey;
+  const char* subKey = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+  const char* valueName = "InstallationType";
+
+  DWORD valueLength = bufferSize;
+
+  // Initialize buffer with empty string
+  buffer[0] = '\0';
+
+  // Open the registry key
+  if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, subKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+    // Return empty buffer if key cannot be opened
+    return;
+  }
+
+  // Query the value
+  if (RegQueryValueExA(hKey, valueName, NULL, NULL, (LPBYTE)buffer, &valueLength) != ERROR_SUCCESS) {
+    RegCloseKey(hKey);
+    buffer[0] = '\0';
+    return;
+  }
+
+  RegCloseKey(hKey);
+}
+
+bool isNanoServer() {
+  const int BUFFER_SIZE = 256;
+  char installationType[BUFFER_SIZE];
+  getWindowsInstallationType(installationType, BUFFER_SIZE);
+  return (strcmp(installationType, "Nano Server") == 0);
+}
+
+void os::win32::initialize_windows_version() {
+  assert(_major_version == 0, "windows version already initialized.");
+
+  VS_FIXEDFILEINFO *file_info;
+  TCHAR kernel32_path[MAX_PATH];
+  UINT len, ret;
+  char error_msg_buffer[512];
+
+  // Get the full path to \Windows\System32\kernel32.dll and use that for
+  // determining what version of Windows we're running on.
+  len = MAX_PATH - (UINT)strlen("\\kernel32.dll") - 1;
+  ret = GetSystemDirectory(kernel32_path, len);
+  if (ret == 0 || ret > len) {
+    size_t buf_len = os::lasterror(error_msg_buffer, sizeof(error_msg_buffer));
+    warning("Attempt to determine system directory failed: %s", buf_len != 0 ? error_msg_buffer : "<unknown error>");
+    return;
+  }
+
+  if (isNanoServer()) {
+    // On Windows Nanoserver the kernel32.dll is located in the forwarders subdirectory
+    strncat(kernel32_path, "\\forwarders\\kernel32.dll", MAX_PATH - ret);
+  } else {
+    strncat(kernel32_path, "\\kernel32.dll", MAX_PATH - ret);
+  }
+
+  DWORD version_size = GetFileVersionInfoSize(kernel32_path, nullptr);
+  if (version_size == 0) {
+    size_t buf_len = os::lasterror(error_msg_buffer, sizeof(error_msg_buffer));
+    warning("Failed to determine whether the OS can retrieve version information from kernel32.dll: %s", buf_len != 0 ? error_msg_buffer : "<unknown error>");
+    return;
+  }
+
+  LPTSTR version_info = (LPTSTR)os::malloc(version_size, mtInternal);
+  if (version_info == nullptr) {
+    warning("os::malloc() failed to allocate %ld bytes for GetFileVersionInfo buffer", version_size);
+    return;
+  }
+
+  if (GetFileVersionInfo(kernel32_path, 0, version_size, version_info) == 0) {
+    os::free(version_info);
+    size_t buf_len = os::lasterror(error_msg_buffer, sizeof(error_msg_buffer));
+    warning("Attempt to retrieve version information from kernel32.dll failed: %s", buf_len != 0 ? error_msg_buffer : "<unknown error>");
+    return;
+  }
+
+  if (VerQueryValue(version_info, TEXT("\\"), (LPVOID*)&file_info, &len) == 0) {
+    os::free(version_info);
+    size_t buf_len = os::lasterror(error_msg_buffer, sizeof(error_msg_buffer));
+    warning("Attempt to determine Windows version from kernel32.dll failed: %s", buf_len != 0 ? error_msg_buffer : "<unknown error>");
+    return;
+  }
+
+  _major_version = HIWORD(file_info->dwProductVersionMS);
+  _minor_version = LOWORD(file_info->dwProductVersionMS);
+  _build_number  = HIWORD(file_info->dwProductVersionLS);
+  _build_minor   = LOWORD(file_info->dwProductVersionLS);
+
+  os::free(version_info);
+}
+
+bool os::win32::is_windows_11_or_greater() {
+  if (IsWindowsServer()) {
+    return false;
+  }
+
+  // Windows 11 starts at build 22000 (Version 21H2)
+  return (windows_major_version() == 10 && windows_build_number() >= 22000) || (windows_major_version() > 10);
+}
+
+bool os::win32::is_windows_server_2022_or_greater() {
+  if (!IsWindowsServer()) {
+    return false;
+  }
+
+  // Windows Server 2022 starts at build 20348.169
+  return (windows_major_version() == 10 && windows_build_number() >= 20348) || (windows_major_version() > 10);
+}
+
+DWORD os::win32::active_processors_in_job_object(DWORD* active_processor_groups) {
+  if (active_processor_groups != nullptr) {
+    *active_processor_groups = 0;
+  }
+  BOOL is_in_job_object = false;
+  if (IsProcessInJob(GetCurrentProcess(), nullptr, &is_in_job_object) == 0) {
+    char buf[512];
+    size_t buf_len = os::lasterror(buf, sizeof(buf));
+    warning("Attempt to determine whether the process is running in a job failed: %s", buf_len != 0 ? buf : "<unknown error>");
+    return 0;
+  }
+
+  if (!is_in_job_object) {
+    return 0;
+  }
+
+  DWORD processors = 0;
+
+  LPVOID job_object_information = nullptr;
+  DWORD job_object_information_length = 0;
+
+  if (QueryInformationJobObject(nullptr, JobObjectGroupInformationEx, nullptr, 0, &job_object_information_length) != 0) {
+    warning("Unexpected QueryInformationJobObject success result.");
+    assert(false, "Unexpected QueryInformationJobObject success result");
+    return 0;
+  }
+
+  DWORD last_error = GetLastError();
+  if (last_error == ERROR_INSUFFICIENT_BUFFER) {
+    DWORD group_count = job_object_information_length / sizeof(GROUP_AFFINITY);
+
+    job_object_information = os::malloc(job_object_information_length, mtInternal);
+    if (job_object_information != nullptr) {
+        if (QueryInformationJobObject(nullptr, JobObjectGroupInformationEx, job_object_information, job_object_information_length, &job_object_information_length) != 0) {
+          DWORD groups_found = job_object_information_length / sizeof(GROUP_AFFINITY);
+          if (groups_found != group_count) {
+            warning("Unexpected processor group count: %ld. Expected %ld processor groups.", groups_found, group_count);
+            assert(false, "Unexpected group count");
+          }
+
+          GROUP_AFFINITY* group_affinity_data = ((GROUP_AFFINITY*)job_object_information);
+          for (DWORD i = 0; i < groups_found; i++, group_affinity_data++) {
+            DWORD processors_in_group = population_count(group_affinity_data->Mask);
+            processors += processors_in_group;
+            if (active_processor_groups != nullptr && processors_in_group > 0) {
+              (*active_processor_groups)++;
+            }
+          }
+
+          if (processors == 0) {
+            warning("Could not determine processor count from the job object.");
+            assert(false, "Must find at least 1 logical processor");
+          }
+        } else {
+          char buf[512];
+          size_t buf_len = os::lasterror(buf, sizeof(buf));
+          warning("Attempt to query job object information failed: %s", buf_len != 0 ? buf : "<unknown error>");
+        }
+
+        os::free(job_object_information);
+    } else {
+        warning("os::malloc() failed to allocate %ld bytes for QueryInformationJobObject", job_object_information_length);
+    }
+  } else {
+    char buf[512];
+    size_t buf_len = os::lasterror(buf, sizeof(buf));
+    warning("Attempt to query job object information failed: %s", buf_len != 0 ? buf : "<unknown error>");
+    assert(false, "Unexpected QueryInformationJobObject error code");
+    return 0;
+  }
+
+  log_debug(os)("Process is running in a job with %d active processors.", processors);
+  return processors;
+}
 
 void os::win32::initialize_system_info() {
   SYSTEM_INFO si;
@@ -3983,15 +4293,31 @@ void os::win32::initialize_system_info() {
   OSInfo::set_vm_allocation_granularity(si.dwAllocationGranularity);
   _processor_type  = si.dwProcessorType;
   _processor_level = si.wProcessorLevel;
-  set_processor_count(si.dwNumberOfProcessors);
+
+  DWORD processors = 0;
+  bool schedules_all_processor_groups = win32::is_windows_11_or_greater() || win32::is_windows_server_2022_or_greater();
+  if (schedules_all_processor_groups) {
+    processors = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (processors == 0) {
+      char buf[512];
+      size_t buf_len = os::lasterror(buf, sizeof(buf));
+      warning("Attempt to determine the processor count from GetActiveProcessorCount() failed: %s", buf_len != 0 ? buf : "<unknown error>");
+      assert(false, "Must find at least 1 logical processor");
+    }
+  }
+
+  set_processor_count(processors > 0 ? processors : si.dwNumberOfProcessors);
 
   MEMORYSTATUSEX ms;
   ms.dwLength = sizeof(ms);
 
   // also returns dwAvailPhys (free physical memory bytes), dwTotalVirtual, dwAvailVirtual,
   // dwMemoryLoad (% of memory in use)
-  GlobalMemoryStatusEx(&ms);
-  _physical_memory = ms.ullTotalPhys;
+  BOOL res = GlobalMemoryStatusEx(&ms);
+  if (res != TRUE) {
+    assert(false, "GlobalMemoryStatusEx failed in os::win32::initialize_system_info(): %lu", ::GetLastError());
+  }
+  _physical_memory = static_cast<physical_memory_size_type>(ms.ullTotalPhys);
 
   if (FLAG_IS_DEFAULT(MaxRAM)) {
     // Adjust MaxRAM according to the maximum virtual address space available.
@@ -4292,6 +4618,7 @@ void nx_check_protection() {
 void os::init(void) {
   _initial_pid = _getpid();
 
+  win32::initialize_windows_version();
   win32::initialize_system_info();
   win32::setmode_streams();
   _page_sizes.add(os::vm_page_size());
@@ -4338,6 +4665,12 @@ size_t os::_os_min_stack_allowed = 64 * K;
 
 // this is called _after_ the global arguments have been parsed
 jint os::init_2(void) {
+  const char* auto_schedules_message = "Host Windows OS automatically schedules threads across all processor groups.";
+  const char* no_auto_schedules_message = "Host Windows OS does not automatically schedule threads across all processor groups.";
+
+  bool schedules_all_processor_groups = win32::is_windows_11_or_greater() || win32::is_windows_server_2022_or_greater();
+  log_debug(os)(schedules_all_processor_groups ? auto_schedules_message : no_auto_schedules_message);
+  log_debug(os)("%d logical processors found.", processor_count());
 
   // This could be set any time but all platforms
   // have to set it the same so we have to mirror Solaris.

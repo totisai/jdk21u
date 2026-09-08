@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2025, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2014, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -38,7 +38,7 @@ enum platform_dependent_constants {
   // simply increase sizes if too small (assembler will crash if too small)
   _initial_stubs_code_size      = 10000,
   _continuation_stubs_code_size =  2000,
-  _compiler_stubs_code_size     = 30000 ZGC_ONLY(+10000),
+  _compiler_stubs_code_size     = 63000,
   _final_stubs_code_size        = 20000 ZGC_ONLY(+100000)
 };
 
@@ -62,6 +62,11 @@ class aarch64 {
   static address _zero_blocks;
 
   static address _large_array_equals;
+  static address _large_arrays_hashcode_boolean;
+  static address _large_arrays_hashcode_byte;
+  static address _large_arrays_hashcode_char;
+  static address _large_arrays_hashcode_int;
+  static address _large_arrays_hashcode_short;
   static address _compare_long_string_LL;
   static address _compare_long_string_LU;
   static address _compare_long_string_UL;
@@ -147,6 +152,25 @@ class aarch64 {
       return _large_array_equals;
   }
 
+  static address large_arrays_hashcode(BasicType eltype) {
+    switch (eltype) {
+    case T_BOOLEAN:
+      return _large_arrays_hashcode_boolean;
+    case T_BYTE:
+      return _large_arrays_hashcode_byte;
+    case T_CHAR:
+      return _large_arrays_hashcode_char;
+    case T_SHORT:
+      return _large_arrays_hashcode_short;
+    case T_INT:
+      return _large_arrays_hashcode_int;
+    default:
+      ShouldNotReachHere();
+    }
+
+    return nullptr;
+  }
+
   static address compare_long_string_LL() {
       return _compare_long_string_LL;
   }
@@ -196,6 +220,8 @@ class aarch64 {
   }
 
 private:
+  static uint16_t  _kyberConsts[];
+  static uint32_t _dilithiumConsts[];
   static juint    _crc_table[];
   static jubyte   _adler_table[];
   // begin trigonometric tables block. See comments in .cpp file

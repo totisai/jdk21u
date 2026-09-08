@@ -93,6 +93,7 @@
 # include <signal.h>
 # include <endian.h>
 # include <errno.h>
+# include <fenv.h>
 # include <dlfcn.h>
 # include <stdio.h>
 # include <unistd.h>
@@ -137,8 +138,6 @@
 
 #define MAX_PATH    (2 * K)
 
-#define MAX_SECS 100000000
-
 // for timer info max values which include all bits
 #define ALL_64_BITS CONST64(0xFFFFFFFFFFFFFFFF)
 
@@ -162,7 +161,7 @@ enum CoredumpFilterBit {
 
 ////////////////////////////////////////////////////////////////////////////////
 // global variables
-julong os::Linux::_physical_memory = 0;
+physical_memory_size_type os::Linux::_physical_memory = 0;
 
 address   os::Linux::_initial_thread_stack_bottom = nullptr;
 uintptr_t os::Linux::_initial_thread_stack_size   = 0;
@@ -237,15 +236,16 @@ julong os::Linux::available_memory_in_container() {
   return avail_mem;
 }
 
-julong os::available_memory() {
-  return Linux::available_memory();
+bool os::available_memory(physical_memory_size_type& value) {
+  return Linux::available_memory(value);
 }
 
-julong os::Linux::available_memory() {
+bool os::Linux::available_memory(physical_memory_size_type& value) {
   julong avail_mem = available_memory_in_container();
   if (avail_mem != static_cast<julong>(-1L)) {
     log_trace(os)("available container memory: " JULONG_FORMAT, avail_mem);
-    return avail_mem;
+    value = static_cast<physical_memory_size_type>(avail_mem);
+    return true;
   }
 
   FILE *fp = os::fopen("/proc/meminfo", "r");
@@ -260,43 +260,52 @@ julong os::Linux::available_memory() {
     fclose(fp);
   }
   if (avail_mem == static_cast<julong>(-1L)) {
-    avail_mem = free_memory();
+    physical_memory_size_type free_mem = 0;
+    if (!free_memory(free_mem)) {
+      return false;
+    }
+    avail_mem = static_cast<julong>(free_mem);
   }
   log_trace(os)("available memory: " JULONG_FORMAT, avail_mem);
-  return avail_mem;
+  value = static_cast<physical_memory_size_type>(avail_mem);
+  return true;
 }
 
-julong os::free_memory() {
-  return Linux::free_memory();
+bool os::free_memory(physical_memory_size_type& value) {
+  return Linux::free_memory(value);
 }
 
-julong os::Linux::free_memory() {
+bool os::Linux::free_memory(physical_memory_size_type& value) {
   // values in struct sysinfo are "unsigned long"
   struct sysinfo si;
   julong free_mem = available_memory_in_container();
   if (free_mem != static_cast<julong>(-1L)) {
     log_trace(os)("free container memory: " JULONG_FORMAT, free_mem);
-    return free_mem;
+    value = static_cast<physical_memory_size_type>(free_mem);
+    return true;
   }
 
-  sysinfo(&si);
+  int ret = sysinfo(&si);
+  if (ret != 0) {
+    return false;
+  }
   free_mem = (julong)si.freeram * si.mem_unit;
   log_trace(os)("free memory: " JULONG_FORMAT, free_mem);
-  return free_mem;
+  value = static_cast<physical_memory_size_type>(free_mem);
+  return true;
 }
 
-julong os::physical_memory() {
-  jlong phys_mem = 0;
+physical_memory_size_type os::physical_memory() {
   if (OSContainer::is_containerized()) {
     jlong mem_limit;
     if ((mem_limit = OSContainer::memory_limit_in_bytes()) > 0) {
       log_trace(os)("total container memory: " JLONG_FORMAT, mem_limit);
-      return mem_limit;
+      return static_cast<physical_memory_size_type>(mem_limit);
     }
   }
 
-  phys_mem = Linux::physical_memory();
-  log_trace(os)("total system memory: " JLONG_FORMAT, phys_mem);
+  physical_memory_size_type phys_mem = Linux::physical_memory();
+  log_trace(os)("total system memory: " PHYS_MEM_TYPE_FORMAT, phys_mem);
   return phys_mem;
 }
 
@@ -453,7 +462,7 @@ void os::Linux::initialize_system_info() {
       fclose(fp);
     }
   }
-  _physical_memory = (julong)sysconf(_SC_PHYS_PAGES) * (julong)sysconf(_SC_PAGESIZE);
+  _physical_memory = static_cast<physical_memory_size_type>(sysconf(_SC_PHYS_PAGES)) * static_cast<physical_memory_size_type>(sysconf(_SC_PAGESIZE));
   assert(processor_count() > 0, "linux error");
 }
 
@@ -916,7 +925,12 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
 
   // init thread attributes
   pthread_attr_t attr;
-  pthread_attr_init(&attr);
+  int rslt = pthread_attr_init(&attr);
+  if (rslt != 0) {
+    thread->set_osthread(nullptr);
+    delete osthread;
+    return false;
+  }
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
   // Calculate stack size if it's not specified by caller.
@@ -965,6 +979,7 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
                             stack_size / K);
     thread->set_osthread(nullptr);
     delete osthread;
+    pthread_attr_destroy(&attr);
     return false;
   }
 
@@ -1804,6 +1819,27 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
 
 void * os::Linux::dlopen_helper(const char *filename, char *ebuf,
                                 int ebuflen) {
+#ifndef IA32
+  // Save and restore the floating-point environment around dlopen().
+  // There are known cases where global library initialization sets
+  // FPU flags that affect computation accuracy, for example, enabling
+  // Flush-To-Zero and Denormals-Are-Zero. Do not let those libraries
+  // break Java arithmetic. Unfortunately, this might affect libraries
+  // that might depend on these FPU features for performance and/or
+  // numerical "accuracy", but we need to protect Java semantics first
+  // and foremost. See JDK-8295159.
+
+  // This workaround is ineffective on IA32 systems because the MXCSR
+  // register (which controls flush-to-zero mode) is not stored in the
+  // legacy fenv.
+
+  fenv_t default_fenv;
+  int rtn = fegetenv(&default_fenv);
+  assert(rtn == 0, "fegetenv must succeed");
+#endif // IA32
+
+  Events::log_dll_message(nullptr, "Attempting to load shared library %s", filename);
+
   void * result = ::dlopen(filename, RTLD_LAZY);
   if (result == nullptr) {
     const char* error_report = ::dlerror();
@@ -1819,6 +1855,16 @@ void * os::Linux::dlopen_helper(const char *filename, char *ebuf,
   } else {
     Events::log_dll_message(nullptr, "Loaded shared library %s", filename);
     log_info(os)("shared library load of %s was successful", filename);
+#ifndef IA32
+    // Quickly test to make sure subnormals are correctly handled.
+    if (! IEEE_subnormal_handling_OK()) {
+      // We just dlopen()ed a library that mangled the floating-point
+      // flags. Silently fix things now.
+      int rtn = fesetenv(&default_fenv);
+      assert(rtn == 0, "fesetenv must succeed");
+      assert(IEEE_subnormal_handling_OK(), "fsetenv didn't work");
+    }
+#endif // IA32
   }
   return result;
 }
@@ -2009,6 +2055,10 @@ void os::print_os_info(outputStream* st) {
   }
 
   if (os::Linux::print_container_info(st)) {
+    st->cr();
+  }
+
+  if (os::Linux::print_numa_info(st)) {
     st->cr();
   }
 
@@ -2341,15 +2391,26 @@ bool os::Linux::print_container_info(outputStream* st) {
     st->print_cr("%s", i == OSCONTAINER_ERROR ? "not supported" : "no shares");
   }
 
+  jlong j = OSContainer::cpu_usage_in_micros();
+  st->print("cpu_usage_in_micros: ");
+  if (j >= 0) {
+    st->print_cr(JLONG_FORMAT, j);
+  } else {
+    st->print_cr("%s", j == OSCONTAINER_ERROR ? "not supported" : "no usage");
+  }
+
   OSContainer::print_container_helper(st, OSContainer::memory_limit_in_bytes(), "memory_limit_in_bytes");
   OSContainer::print_container_helper(st, OSContainer::memory_and_swap_limit_in_bytes(), "memory_and_swap_limit_in_bytes");
   OSContainer::print_container_helper(st, OSContainer::memory_soft_limit_in_bytes(), "memory_soft_limit_in_bytes");
+  OSContainer::print_container_helper(st, OSContainer::memory_throttle_limit_in_bytes(), "memory_throttle_limit_in_bytes");
   OSContainer::print_container_helper(st, OSContainer::memory_usage_in_bytes(), "memory_usage_in_bytes");
   OSContainer::print_container_helper(st, OSContainer::memory_max_usage_in_bytes(), "memory_max_usage_in_bytes");
+  OSContainer::print_container_helper(st, OSContainer::rss_usage_in_bytes(), "rss_usage_in_bytes");
+  OSContainer::print_container_helper(st, OSContainer::cache_usage_in_bytes(), "cache_usage_in_bytes");
 
   OSContainer::print_version_specific_info(st);
 
-  jlong j = OSContainer::pids_max();
+  j = OSContainer::pids_max();
   st->print("maximum number of tasks: ");
   if (j > 0) {
     st->print_cr(JLONG_FORMAT, j);
@@ -2367,6 +2428,97 @@ bool os::Linux::print_container_info(outputStream* st) {
     }
   }
 
+  return true;
+}
+
+#define SYS_DEVICES_NODE "/sys/devices/system/node"
+
+static size_t read_sysfs_file(const char* path, char* buf, size_t sz) {
+  FILE* f = os::fopen(path, "r");
+  if (f == nullptr) return 0;
+  size_t n = fread(buf, 1, sz - 1, f);
+  fclose(f);
+  buf[n] = '\0';
+  while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
+  return n;
+}
+
+static void print_numa_memory_info(outputStream* st, int node) {
+  char path[256];
+  char line[256];
+  long long mem_total = -1;
+  long long mem_free = -1;
+  os::snprintf_checked(path, sizeof(path), SYS_DEVICES_NODE "/node%d/meminfo", node);
+  FILE* f = os::fopen(path, "r");
+  if (f == nullptr) {
+    return;
+  }
+
+  while (fgets(line, sizeof(line), f) != nullptr) {
+    long long mval;
+    if (sscanf(line, "Node %*d MemTotal: %lld kB", &mval) == 1) mem_total = mval;
+    if (sscanf(line, "Node %*d MemFree: %lld kB",  &mval) == 1) mem_free  = mval;
+  }
+  fclose(f);
+
+  if (mem_total >= 0) { st->print_cr("mem size: %lld kB", mem_total); }
+  if (mem_free >= 0) { st->print_cr("mem free: %lld kB", mem_free); }
+}
+
+static void print_numa_cpu_list(outputStream* st, int node) {
+  char path[256];
+  char buf[1024];
+  os::snprintf_checked(path, sizeof(path), SYS_DEVICES_NODE "/node%d/cpulist", node);
+  if (read_sysfs_file(path, buf, sizeof(buf)) > 0) {
+    st->print_cr("cpus: %s", buf);
+  } else {
+    st->print_cr("cpus: (unavailable)");
+  }
+}
+
+bool os::Linux::print_numa_info(outputStream* st) {
+  if (!UseNUMA) {
+    // If NUMA optimizations are not enabled we don't print anything
+    return false;
+  }
+
+  char buf[1024];
+  if (read_sysfs_file("/sys/devices/system/node/online", buf, sizeof(buf)) > 0) {
+    st->print_cr("NUMA nodes online: %s", buf);
+  } else {
+    return false;
+  }
+
+  bool first = true;
+  int node_count = 0;
+
+  if (nindex_to_node() == nullptr) {
+    return false;
+  }
+
+  for (int node: *nindex_to_node()) {
+    char nodepath[256];
+    os::snprintf_checked(nodepath, sizeof(nodepath), SYS_DEVICES_NODE "/node%d", node);
+    DIR* currd = os::opendir(nodepath);
+    if (currd == nullptr) continue;
+    if (first) {
+      st->cr();
+      first = false;
+    }
+    os::closedir(currd);
+
+    st->print_cr("NUMA node %d", node);
+    streamIndentor si(st);
+    print_numa_cpu_list(st, node);
+    print_numa_memory_info(st, node);
+    node_count++;
+  }
+
+  if (node_count == 0) {
+    return false;
+  }
+
+  st->print_cr("Total NUMA node count: %d", node_count);
   return true;
 }
 
@@ -2396,11 +2548,13 @@ void os::print_memory_info(outputStream* st) {
   // values in struct sysinfo are "unsigned long"
   struct sysinfo si;
   sysinfo(&si);
-
-  st->print(", physical " UINT64_FORMAT "k",
-            os::physical_memory() >> 10);
-  st->print("(" UINT64_FORMAT "k free)",
-            os::available_memory() >> 10);
+  physical_memory_size_type phys_mem = physical_memory();
+  st->print(", physical " PHYS_MEM_TYPE_FORMAT "k",
+            phys_mem >> 10);
+  physical_memory_size_type avail_mem = 0;
+  (void)os::available_memory(avail_mem);
+  st->print("(" PHYS_MEM_TYPE_FORMAT "k free)",
+            avail_mem >> 10);
   st->print(", swap " UINT64_FORMAT "k",
             ((jlong)si.totalswap * si.mem_unit) >> 10);
   st->print("(" UINT64_FORMAT "k free)",
@@ -3514,8 +3668,23 @@ bool os::remove_stack_guard_pages(char* addr, size_t size) {
 // may not start from the requested address. Unlike Linux mmap(), this
 // function returns null to indicate failure.
 static char* anon_mmap(char* requested_addr, size_t bytes) {
-  // MAP_FIXED is intentionally left out, to leave existing mappings intact.
-  const int flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS;
+  // If a requested address was given:
+  //
+  // The POSIX-conforming way is to *omit* MAP_FIXED. This will leave existing mappings intact.
+  // If the requested mapping area is blocked by a pre-existing mapping, the kernel will map
+  // somewhere else. On Linux, that alternative address appears to have no relation to the
+  // requested address.
+  // Unfortunately, this is not what we need - if we requested a specific address, we'd want
+  // to map there and nowhere else. Therefore we will unmap the block again, which means we
+  // just executed a needless mmap->munmap cycle.
+  // Since Linux 4.17, the kernel offers MAP_FIXED_NOREPLACE. With this flag, if a pre-
+  // existing mapping exists, the kernel will not map at an alternative point but instead
+  // return an error. We can therefore save that unnecessary mmap-munmap cycle.
+  //
+  // Backward compatibility: Older kernels will ignore the unknown flag; so mmap will behave
+  // as in mode (a).
+  const int flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS |
+                    ((requested_addr != nullptr) ? MAP_FIXED_NOREPLACE : 0);
 
   // Map reserved/uncommitted pages PROT_NONE so we fail early if we
   // touch an uncommitted page. Otherwise, the read/write might
@@ -4284,6 +4453,7 @@ char* os::pd_attempt_reserve_memory_at(char* requested_addr, size_t bytes, bool 
 
   if (addr != nullptr) {
     // mmap() is successful but it fails to reserve at the requested address
+    log_trace(os, map)("Kernel rejected " PTR_FORMAT ", offered " PTR_FORMAT ".", p2i(requested_addr), p2i(addr));
     anon_munmap(addr, bytes);
   }
 
@@ -5336,7 +5506,7 @@ int os::get_core_path(char* buffer, size_t bufferSize) {
 
     if (core_pattern[0] == '|') {
       written = jio_snprintf(buffer, bufferSize,
-                             "\"%s\" (or dumping to %s/core.%d)",
+                             "\"%s\" (alternatively, falling back to %s/core.%d)",
                              &core_pattern[1], p, current_process_id());
     } else if (pid_pos != nullptr) {
       *pid_pos = '\0';

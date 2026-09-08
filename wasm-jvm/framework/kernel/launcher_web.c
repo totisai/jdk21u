@@ -55,8 +55,8 @@ int main(int argc, char** argv) {
     int n = 0;
 
     /* classpath: /work/classpath overrides the default /app */
-    static char cp[1024] = "-Djava.class.path=/app";
-    { char v[900]; if (read_line_file("/work/classpath", v, sizeof(v)))
+    static char cp[16384] = "-Djava.class.path=/app";
+    { char v[16000]; if (read_line_file("/work/classpath", v, sizeof(v)))
         snprintf(cp, sizeof(cp), "-Djava.class.path=%s", v); }
     opts[n++].optionString = cp;
 
@@ -95,11 +95,13 @@ int main(int argc, char** argv) {
     vm_args.options = opts;
     vm_args.ignoreUnrecognized = JNI_TRUE;
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(EMUNET)
     /* If /work/bridge holds a WebSocket URL, wire the JVM's POSIX sockets to the
      * websocket_to_posix_proxy relay. Connect it BEFORE JNI_CreateJavaVM so the
      * proxied socket layer is live during VM init (which may touch sockets under
-     * PROXY_POSIX_SOCKETS), avoiding a deadlock. */
+     * PROXY_POSIX_SOCKETS), avoiding a deadlock.
+     * (Skipped in the emunet tier: sockets are served by an in-sandbox loopback
+     * stack — emunet.c — so there is no relay to connect.) */
     {
         char url[256];
         if (read_line_file("/work/bridge", url, sizeof(url))) {
@@ -126,7 +128,11 @@ int main(int argc, char** argv) {
     if (rc != JNI_OK) return 1;
 
     const char* mainClass = (argc > 1) ? argv[1] : "Hello";
-    jclass cls = (*env)->FindClass(env, mainClass);
+    /* FindClass wants the JNI internal form (slashes), so accept a dotted FQN
+     * like "demo.App" and translate '.' -> '/'. */
+    char mc[1024]; strncpy(mc, mainClass, sizeof(mc) - 1); mc[sizeof(mc) - 1] = 0;
+    for (char* p = mc; *p; p++) if (*p == '.') *p = '/';
+    jclass cls = (*env)->FindClass(env, mc);
     if (!cls) { printf("[launcher] class %s not found\n", mainClass); (*env)->ExceptionDescribe(env); return 2; }
     jmethodID mid = (*env)->GetStaticMethodID(env, cls, "main", "([Ljava/lang/String;)V");
     if (!mid) { printf("[launcher] main not found\n"); return 3; }

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spring Boot in the browser — OpenJDK on WebAssembly</title>
+<link rel="stylesheet" href="assets/site.css">
+<script src="coi-serviceworker.js"></script>
+<style>
+  main{max-width:960px;margin:0 auto;padding:22px 20px 60px}
+  .lead{color:var(--dim);font-size:15px;line-height:1.6;margin:0 0 18px}
+  .lead code{font-family:var(--mono);color:var(--accent2);background:#0b0f14;padding:1px 5px;border-radius:4px;font-size:12.5px}
+  .diagram{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--dim);
+    background:var(--panel2);border:1px solid var(--edge);border-radius:8px;padding:10px 14px;margin:0 0 18px}
+  .diagram b{color:var(--ink)} .diagram .arrow{color:var(--accent)}
+  .req{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+  select,input,button{font-family:var(--sans);font-size:13px}
+  select,input{background:#0b0f14;color:var(--ink);border:1px solid var(--edge);border-radius:6px;padding:7px 9px}
+  #path{flex:1;min-width:220px;font-family:var(--mono)}
+  .btn{background:var(--accent);color:#111;border:none;border-radius:6px;padding:8px 16px;font-weight:600;cursor:pointer}
+  .btn:disabled{opacity:.5;cursor:default}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--edge);border-radius:8px;overflow:hidden}
+  .panel .h{padding:7px 12px;border-bottom:1px solid var(--edge);background:var(--panel2);
+    font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)}
+  pre{margin:0;padding:12px;font-family:var(--mono);font-size:12px;line-height:1.5;color:var(--ink);
+    white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto;background:#0b0f14}
+  #log .sys{color:var(--faint)} #log .err{color:var(--err)} #log .ok{color:var(--ok)}
+  textarea{width:100%;box-sizing:border-box;background:#0b0f14;color:var(--ink);border:1px solid var(--edge);
+    border-radius:6px;padding:8px;font-family:var(--mono);font-size:12px;min-height:56px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="logo">🌱</span>
+  <h1>Spring Boot in your <b>browser tab</b></h1>
+  <span class="tag">emulated TCP · no network</span>
+  <span class="spacer"></span>
+  <span class="status" id="status"><span class="dot"></span><span id="statusText">idle</span></span>
+  <nav><a href="index.html">Home</a><a href="repl.html">REPL</a><a href="swing.html">Swing</a><a href="gl.html">3D</a><a href="fs.html">Files</a><a href="net.html">Net</a><a href="jit.html">JIT</a><a href="spring.html">Spring</a><a href="integrate.html">Docs</a></nav>
+</div>
+
+<main>
+  <p class="lead">
+    A <b>real Spring Boot 3.2 app</b> — embedded Tomcat, <code>@RestController</code>, Jackson JSON —
+    running entirely inside the wasm JVM. This page is an HTTP client that opens a
+    <b>TCP connection to the server running in the tab</b> and speaks HTTP/1.1 to it. There is
+    <b>no network</b>: the socket is a loopback stack living in wasm memory
+    (<code>bind</code>/<code>accept</code>/<code>poll</code>/<code>read</code>/<code>write</code>
+    emulated), so Tomcat binds <code>127.0.0.1:8080</code> and the browser dials it — all in-process.
+  </p>
+  <div class="diagram">
+    <b>this page</b> <span class="arrow">──HTTP/1.1──▶</span> emulated TCP loopback (wasm memory)
+    <span class="arrow">──▶</span> <b>Tomcat</b> <span class="arrow">──▶</span> Spring <code>DispatcherServlet</code>
+    <span class="arrow">──▶</span> <b>@RestController</b>
+  </div>
+
+  <div class="req">
+    <button class="btn" id="boot">Boot Spring Boot ▸</button>
+    <select id="method"><option>GET</option><option>POST</option></select>
+    <input id="path" value="/api/hello">
+    <button class="btn" id="send" disabled>Send</button>
+  </div>
+  <textarea id="body" placeholder='POST body (JSON), e.g. {"name":"wasm"}' hidden></textarea>
+
+  <div class="grid" style="margin-top:14px">
+    <div class="panel"><div class="h">Response</div><pre id="resp">(boot the app, then send a request)</pre></div>
+    <div class="panel"><div class="h">VM / Spring log</div><pre id="log"></pre></div>
+  </div>
+</main>
+
+<script src="jvm/jvm-base-emunet.js"></script>
+<script type="module">
+import { jvmFetch } from './jvm/emunet.js';
+const $=(id)=>document.getElementById(id);
+const status=$('status'), statusText=$('statusText'), logEl=$('log');
+function setStatus(c,t){ status.className='status '+c; statusText.textContent=t; }
+function log(s,cls){ const sp=document.createElement('span'); if(cls)sp.className=cls;
+  sp.textContent=(s.endsWith('\n')?s:s+'\n'); logEl.appendChild(sp); logEl.scrollTop=logEl.scrollHeight; }
+
+$('method').onchange = () => { $('body').hidden = $('method').value !== 'POST'; if($('method').value==='POST'&&!$('path').value.includes('echo')) $('path').value='/api/echo'; };
+
+let mod=null, bootP=null, ready=false;
+function boot(){
+  if(bootP) return bootP;
+  if(!window.crossOriginIsolated) return Promise.reject(new Error('not cross-origin isolated (reload to activate the service worker)'));
+  if(!window.createJVM) return Promise.reject(new Error('runtime failed to load (jvm/jvm-base-emunet.js)'));
+  setStatus('busy','downloading runtime (~59 MB)…');
+  bootP=(async()=>{
+    const gz=await fetch('jvm/jvm-base-emunet.data.gz');
+    if(!gz.ok) throw new Error('fetch data.gz '+gz.status);
+    const buf=await new Response(gz.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+    setStatus('busy','booting Spring Boot (~20s)…');
+    log('Booting the JVM and starting Spring Boot…','sys');
+    mod=await window.createJVM({
+      arguments:['demo.App'],
+      getPreloadedPackage:(n,s)=>buf,
+      locateFile:(p)=>'jvm/'+p,
+      preRun:[M=>{
+        try{M.FS.mkdir('/work');}catch(e){}
+        // classpath = /app + every staged jar (baked into /app/lib). Read the dir if
+        // available, else fall back to the known Spring Boot dependency set.
+        const KNOWN=['jackson-annotations-2.15.4.jar','jackson-core-2.15.4.jar','jackson-databind-2.15.4.jar',
+          'jakarta.annotation-api-2.1.1.jar','micrometer-commons-1.12.13.jar','micrometer-observation-1.12.13.jar',
+          'slf4j-api-2.0.13.jar','snakeyaml-2.2.jar','spring-aop-6.1.14.jar','spring-beans-6.1.14.jar',
+          'spring-boot-3.2.12.jar','spring-boot-autoconfigure-3.2.12.jar','spring-context-6.1.14.jar',
+          'spring-core-6.1.14.jar','spring-expression-6.1.14.jar','spring-jcl-6.1.14.jar','spring-web-6.1.14.jar',
+          'spring-webmvc-6.1.14.jar','tomcat-embed-core-10.1.34.jar','tomcat-embed-el-10.1.34.jar'];
+        let jars=[]; try{ jars=M.FS.readdir('/app/lib').filter(j=>j.endsWith('.jar')); }catch(e){}
+        if(jars.length===0) jars=KNOWN;
+        M.FS.writeFile('/work/classpath', ['/app', ...jars.map(j=>'/app/lib/'+j)].join(':'));
+        M.FS.writeFile('/work/addmods','ALL-SYSTEM');
+        M.FS.writeFile('/work/vmopts',['-Dserver.port=8080','-Dspring.main.banner-mode=off','-Dspring.jmx.enabled=false'].join('\n'));
+      }],
+      print:s=>{ if(/unsupported syscall/.test(s))return;
+        if(/SPRING READY|Tomcat started|Started App/.test(s)){ ready=true; }
+        log(s); },
+      printErr:s=>{ if(/unsupported syscall|Unknown module: java\.desktop|SLF4J/.test(s))return; log(s,'err'); },
+    });
+  })();
+  return bootP;
+}
+
+$('boot').onclick=async()=>{
+  $('boot').disabled=true;
+  try{
+    await boot();
+    // wait for Spring to report ready
+    for(let i=0;i<3000 && !ready;i++) await new Promise(r=>setTimeout(r,100));
+    if(!ready) throw new Error('Spring did not become ready');
+    setStatus('ok','Spring Boot ready · Tomcat on :8080');
+    log('Spring Boot is up. Send a request →','ok');
+    $('send').disabled=false; $('boot').textContent='Running ✓';
+  }catch(e){ log('Error: '+(e&&e.message||e),'err'); setStatus('err','error'); $('boot').disabled=false; }
+};
+
+$('send').onclick=async()=>{
+  $('send').disabled=true;
+  const method=$('method').value, path=$('path').value||'/';
+  const respEl=$('resp'); respEl.textContent='…';
+  try{
+    const t0=performance.now();
+    const opt={ port:8080, method, path };
+    if(method==='POST'){ opt.body=$('body').value||'{}'; opt.headers={'Content-Type':'application/json'}; }
+    const res=await jvmFetch(mod, opt);
+    const ms=(performance.now()-t0).toFixed(0);
+    let bodyText=res.text();
+    try{ bodyText=JSON.stringify(JSON.parse(bodyText),null,2); }catch(e){}
+    respEl.textContent=`HTTP ${res.status} ${res.statusText}   (${ms} ms)\n`+
+      Object.entries(res.headers).map(([k,v])=>`${k}: ${v}`).join('\n')+`\n\n${bodyText}`;
+    log(`${method} ${path} → ${res.status} in ${ms} ms`,'ok');
+  }catch(e){ respEl.textContent='Error: '+(e&&e.message||e); log('request failed: '+e,'err'); }
+  $('send').disabled=false;
+};
+
+log('Ready. Click "Boot Spring Boot" to download the runtime and start the app.','sys');
+</script>
+</body>
+</html>

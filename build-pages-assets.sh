@@ -35,6 +35,17 @@ gzip -9 -c "$WEB/jvm-base.data" > "$OUT/jvm-base.data.gz"
 cp "$WEB/jvmgl.js" "$WEB/jvmgl.wasm" "$WEB/jvmgl.worker.js" "$OUT/"
 gzip -9 -c "$WEB/jvmgl.data" > "$OUT/jvmgl.data.gz"
 
+# Spring Boot bundle (spring.html): the emunet tier (in-sandbox loopback TCP) with
+# a Spring Boot app baked into /app. Built with:
+#   (cd build/<conf> && bash framework/build/stage-modules.sh)   # java.desktop + jgss
+#   EMUNET=1 bash framework/build/build-jvm.sh base              # after staging Spring in web/fwapp
+# emunet.js is the browser TCP client the page imports.
+if [ -f "$WEB/jvm-base-emunet.js" ]; then
+  cp "$WEB/jvm-base-emunet.js" "$WEB/jvm-base-emunet.wasm" "$WEB/jvm-base-emunet.worker.js" "$OUT/"
+  cp "$JDK/wasm-jvm/framework/net/emunet.js" "$OUT/"
+  gzip -9 -c "$WEB/jvm-base-emunet.data" > "$OUT/jvm-base-emunet.data.gz"
+fi
+
 # Apply the FFI fix to the shipped jvm-base.js (see note above). No-op if the
 # working variant is already present.
 node --input-type=module - "$WEB/jvmawt.js" "$OUT/jvm-base.js" <<'NODE'
@@ -51,5 +62,22 @@ for (const sig of ['function ffi_call_js(', 'function ffi_prep_closure_loc_js(']
 writeFileSync(path, tgt.join('\n'));
 console.error('ffi patch: replaced '+n+' function(s) in jvm-base.js');
 NODE
+
+# Same FFI fix for the emunet (Spring) bundle.
+if [ -f "$OUT/jvm-base-emunet.js" ]; then
+node --input-type=module - "$WEB/jvmawt.js" "$OUT/jvm-base-emunet.js" <<'NODE'
+import { readFileSync, writeFileSync } from 'node:fs';
+const good = readFileSync(process.argv[2],'utf8').split('\n');
+const path = process.argv[3];
+let tgt = readFileSync(path,'utf8').split('\n'); let n=0;
+for (const sig of ['function ffi_call_js(', 'function ffi_prep_closure_loc_js(']) {
+  const g = good.find(l=>l.trimStart().startsWith(sig));
+  const i = tgt.findIndex(l=>l.trimStart().startsWith(sig));
+  if (g && i>=0 && tgt[i].trimStart()!==g.trimStart()) { tgt[i]=tgt[i].match(/^\s*/)[0]+g.trimStart(); n++; }
+}
+writeFileSync(path, tgt.join('\n'));
+console.error('ffi patch: replaced '+n+' function(s) in jvm-base-emunet.js');
+NODE
+fi
 
 echo "assembled $OUT ($(du -sh "$OUT" | cut -f1))"

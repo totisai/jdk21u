@@ -510,4 +510,20 @@ EMSCRIPTEN_KEEPALIVE int emunet_readable(int fd) {
 }
 EMSCRIPTEN_KEEPALIVE int emunet_close(int fd) { return __wrap_close(fd); }
 
+/* A shared scratch buffer so the JS client can move bytes in/out without needing
+ * _malloc exported: JS fills HEAPU8 at emunet_buf() then calls emunet_send_buf, or
+ * calls emunet_recv_buf then reads HEAPU8 at emunet_buf(). One request at a time
+ * (the loopback client is sequential). */
+#define EMU_SCRATCH (256 * 1024)
+static uint8_t g_scratch[EMU_SCRATCH];
+EMSCRIPTEN_KEEPALIVE uint8_t* emunet_buf(void)      { return g_scratch; }
+EMSCRIPTEN_KEEPALIVE int      emunet_buf_size(void) { return EMU_SCRATCH; }
+EMSCRIPTEN_KEEPALIVE int      emunet_send_buf(int fd, int len) {
+  if (len > EMU_SCRATCH) len = EMU_SCRATCH;
+  return emunet_send(fd, g_scratch, len);
+}
+EMSCRIPTEN_KEEPALIVE int      emunet_recv_buf(int fd) {
+  return emunet_recv(fd, g_scratch, EMU_SCRATCH);
+}
+
 #endif /* __EMSCRIPTEN__ */

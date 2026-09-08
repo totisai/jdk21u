@@ -19,9 +19,30 @@ void bputs(Buf* b, const uint8_t* s, int n){ for(int i=0;i<n;i++) bput(b,s[i]); 
 void uleb(Buf* b, uint32_t v){ do{ uint8_t x=v&0x7f; v>>=7; if(v) x|=0x80; bput(b,x);}while(v); }
 void sleb(Buf* b, int64_t v){ int more=1; while(more){ uint8_t x=v&0x7f; v>>=7; if((v==0&&!(x&0x40))||(v==-1&&(x&0x40))) more=0; else x|=0x80; bput(b,x);} }
 
-void get_local(Buf* c, uint32_t idx){ bput(c,0x20); uleb(c,idx); }
-void set_local(Buf* c, uint32_t idx){ bput(c,0x21); uleb(c,idx); }
-void tee_local(Buf* c, uint32_t idx){ bput(c,0x22); uleb(c,idx); }
+void get_local(Buf* c, uint32_t idx){ bput(c,op_local_get); uleb(c,idx); }
+void set_local(Buf* c, uint32_t idx){ bput(c,op_local_set); uleb(c,idx); }
+void tee_local(Buf* c, uint32_t idx){ bput(c,op_local_tee); uleb(c,idx); }
+
+void i32_const(Buf* c, int32_t v){ bput(c,op_i32_const); sleb(c,v); }
+void i64_const(Buf* c, int64_t v){ bput(c,op_i64_const); sleb(c,v); }
+void emit_call(Buf* c, uint32_t func){ bput(c,op_call); uleb(c,func); }
+
+// A memory load/store: opcode followed by its {align, offset} immediates.
+void mem_op(Buf* c, WOp op, uint32_t align, uint32_t offset){ bput(c,op); uleb(c,align); uleb(c,offset); }
+
+// Structured control flow. The block/if/loop forms all take an empty ([]->[])
+// blocktype, which is how this backend uses them.
+void trunc_sat(Buf* c, uint8_t sel){ bput(c,op_trunc_sat_prefix); bput(c,sel); }
+void if_void(Buf* c){ bput(c,op_if); bput(c,bt_void); }
+void if_type(Buf* c, uint8_t blocktype){ bput(c,op_if); bput(c,blocktype); }
+void block_void(Buf* c){ bput(c,op_block); bput(c,bt_void); }
+void loop_void(Buf* c){ bput(c,op_loop); bput(c,bt_void); }
+void emit_else(Buf* c){ bput(c,op_else); }
+void emit_end(Buf* c){ bput(c,op_end); }
+void br(Buf* c, uint32_t depth){ bput(c,op_br); uleb(c,depth); }
+void br_if(Buf* c, uint32_t depth){ bput(c,op_br_if); uleb(c,depth); }
+void ret(Buf* c){ bput(c,op_return); }
+void drop(Buf* c){ bput(c,op_drop); }
 // widen top-of-stack value of type t to i64, or narrow an i64 back to type t
 // (round-trips exactly: wrap recovers the low 32 bits regardless of extension).
 void widen_i64(Buf* c, int t){ switch(t){ case TJ: break; case TF: bput(c,0xbc); bput(c,0xad); break;

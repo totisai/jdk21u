@@ -312,18 +312,18 @@ int compile_cf(Ctx* x, const uint8_t* bc, int bclen, Buf* out) {
     for (int i=0;i<hn;i++) is_hstart[het[i].handler_pc] = 1; }
 
   Buf body = {};
-  bput(&body, 0x03); bput(&body, 0x40);          // loop (void)
-  if (x->has_backedge) { bput(&body,0x10); uleb(&body,Imp::POLL); }  // call $poll (import 0) per iteration
+  loop_void(&body);                              // loop (void)
+  if (x->has_backedge) { emit_call(&body,Imp::POLL); }  // call $poll (import 0) per iteration
   int cur = 0;
   for (int pc = 0; pc < bclen; ) {
     if (!leader[pc]) { pc += instr_len(bc, pc); continue; }
-    get_local(&body,x->BB); bput(&body,0x41); sleb(&body,cur); bput(&body,0x46);
-    bput(&body,0x04); bput(&body,0x40);          // if (i32.eq $bb cur)
+    get_local(&body,x->BB); i32_const(&body,cur); bput(&body,op_i32_eq);
+    if_void(&body);          // if (i32.eq $bb cur)
     int blkend = pc; do { blkend += instr_len(bc, blkend); } while (blkend < bclen && !leader[blkend]);
     int lastpc = pc; while (lastpc + instr_len(bc,lastpc) < blkend) lastpc += instr_len(bc,lastpc);
     x->vn = 0;
     if (is_hstart[pc]) {                              // handler entry: take the exception oop
-      bput(&body,0x10); uleb(&body,Imp::TAKE_EXCEPTION);              // call $take_exception -> i32 oop
+      emit_call(&body,Imp::TAKE_EXCEPTION);              // call $take_exception -> i32 oop
       vpush(x, TA);                                  // (first op is astore/pop -> consumed immediately)
     }
     for (int p = pc; p < blkend; ) {
@@ -332,54 +332,54 @@ int compile_cf(Ctx* x, const uint8_t* bc, int bclen, Buf* out) {
         // set $bb from the index via a linear compare chain, then br to loop top
         int pd = switch_pad(p), base = p+1+pd, ntgt, toff, low=0;
         set_local(&body, x->TMPI);                   // index
-        bput(&body,0x41); sleb(&body, blk_of[p + s4be(bc,base)]);  // default
+        i32_const(&body,blk_of[p + s4be(bc,base)]);  // default
         set_local(&body, x->BB);
         if (op==0xaa) { low=s4be(bc,base+4); int high=s4be(bc,base+8); ntgt=high-low+1; toff=base+12; }
         else          { ntgt=s4be(bc,base+4); toff=base+8; }
         for (int j=0;j<ntgt;j++) {
           int matchv = (op==0xaa) ? low+j : s4be(bc, toff+j*8);
           int tpc = p + s4be(bc, toff + (op==0xaa ? j*4 : j*8+4));
-          get_local(&body, x->TMPI); bput(&body,0x41); sleb(&body,matchv); bput(&body,0x46); // idx==match
-          bput(&body,0x04); bput(&body,0x40);
-            bput(&body,0x41); sleb(&body, blk_of[tpc]); set_local(&body,x->BB);
-          bput(&body,0x0b);
+          get_local(&body, x->TMPI); i32_const(&body,matchv); bput(&body,op_i32_eq); // idx==match
+          if_void(&body);
+            i32_const(&body,blk_of[tpc]); set_local(&body,x->BB);
+          emit_end(&body);
         }
-        bput(&body,0x0c); uleb(&body,1);             // br loop
+        br(&body,1);             // br loop
       } else if (is_branch(op)) {
         int tgt = blk_of[branch_target(bc, p)], fall = blk_of[p + L];
-        if (op == 0xa7 || op == 0xc8) { bput(&body,0x41); sleb(&body,tgt); }
+        if (op == 0xa7 || op == 0xc8) { i32_const(&body,tgt); }
         else { emit_cond(&body, op);
                set_local(&body,x->TMPI);
-               bput(&body,0x41); sleb(&body,tgt); bput(&body,0x41); sleb(&body,fall);
-               get_local(&body,x->TMPI); bput(&body,0x1b); }
-        set_local(&body,x->BB); bput(&body,0x0c); uleb(&body,1);
+               i32_const(&body,tgt); i32_const(&body,fall);
+               get_local(&body,x->TMPI); bput(&body,op_select); }
+        set_local(&body,x->BB); br(&body,1);
       } else if (is_return(op)) {
         emit_sync_unlock(x, &body);                // sync method: unlock `this` before returning (result stays on stack)
         if (x->n_spill > 0) {                      // pop the oop-spill frame (result stays below n)
-          bput(&body,0x41); sleb(&body,x->n_spill); bput(&body,0x10); uleb(&body,Imp::OOP_LEAVE);
+          i32_const(&body,x->n_spill); emit_call(&body,Imp::OOP_LEAVE);
         }
         switch (op) {                              // widen result to i64 to match fn type
-          case 0xac: bput(&body,0xac); break;      // ireturn: i64.extend_i32_s
-          case 0xb0: bput(&body,0xad); break;      // areturn: i64.extend_i32_u (oop addr)
+          case 0xac: bput(&body,op_i64_extend_i32_s); break;      // ireturn: i64.extend_i32_s
+          case 0xb0: bput(&body,op_i64_extend_i32_u); break;      // areturn: i64.extend_i32_u (oop addr)
           case 0xad: break;                        // lreturn: already i64
-          case 0xae: bput(&body,0xbc); bput(&body,0xad); break; // freturn: reinterpret + extend_u
-          case 0xaf: bput(&body,0xbd); break;      // dreturn: i64.reinterpret_f64
-          case 0xb1: bput(&body,0x42); sleb(&body,0); break;    // return void: push 0
+          case 0xae: bput(&body,op_i32_reinterpret_f32); bput(&body,op_i64_extend_i32_u); break; // freturn: reinterpret + extend_u
+          case 0xaf: bput(&body,op_i64_reinterpret_f64); break;      // dreturn: i64.reinterpret_f64
+          case 0xb1: i64_const(&body,0); break;    // return void: push 0
         }
-        bput(&body,0x0f);
+        ret(&body);
       } else {
         emit_op(x, &body, bc, p);
       }
       p += L;
     }
     if (!is_branch(bc[lastpc]) && !is_return(bc[lastpc]) && !is_switch(bc[lastpc])) {
-      bput(&body,0x41); sleb(&body, blk_of[blkend]);
-      set_local(&body,x->BB); bput(&body,0x0c); uleb(&body,1);
+      i32_const(&body,blk_of[blkend]);
+      set_local(&body,x->BB); br(&body,1);
     }
-    bput(&body,0x0b);                            // end if
+    emit_end(&body);                            // end if
     cur++; pc = blkend;
   }
-  bput(&body,0x0b); bput(&body,0x00);            // end loop; unreachable
+  emit_end(&body); bput(&body,op_unreachable);            // end loop; unreachable
   free(is_hstart);
   if (x->bail) { free(body.p); free(leader); free(blk_of); free(vtbuf); free(vspillbuf); return -1; }
   *out = body; free(leader); free(vtbuf); free(vspillbuf);

@@ -19,13 +19,18 @@ cd "$BUILD"
 # default artifact stays non-net: the socket-proxy build blocks at boot when no
 # relay bridge is connected, so it must only be loaded when networking is requested.
 SUF=""; { [ "${NET:-0}" = 1 ] && [ "$TIER" != net ] && [ "$TIER" != full ]; } && SUF="-net"
+# EMUNET=1 layers the in-sandbox loopback TCP stack (emunet.c) onto any tier: a
+# real server (ServerSocket/Tomcat/Jetty/Netty/...) binds and accepts, the page
+# connects and speaks HTTP, all in linear memory -- no relay, no WebSocket. It is
+# mutually exclusive with NET (which is the real-internet relay bridge).
+[ "${EMUNET:-0}" = 1 ] && SUF="-emunet"
 OUT="web/jvm-$TIER$SUF.js"
 cp "$JDK/wasm-jvm/framework/kernel/launcher_web.c" web/launcher_web.c   # keep the built copy in sync with source
 
 BIN="fwbin/$TIER"; mkdir -p "$BIN"
 
 # ---- capability flags per tier ------------------------------------------------
-WANT_AWT=0; WANT_GL=0; WANT_NET=0
+WANT_AWT=0; WANT_GL=0; WANT_NET=0; WANT_EMUNET=0
 case "$TIER" in
   full) WANT_AWT=1; WANT_GL=1; WANT_NET=1 ;;   # the one universal JVM: Swing + Java2D + OpenGL + TCP sockets
   awt)  WANT_AWT=1 ;;
@@ -36,6 +41,8 @@ esac
 # sockets over the websocket_to_posix_proxy bridge). Lets the awt/gl PoC reach
 # the network exactly like the net tier does -- no per-tier socket reinvention.
 [ "${NET:-0}" = 1 ] && WANT_NET=1
+# EMUNET=1 wins over NET: use the in-sandbox loopback instead of the relay bridge.
+[ "${EMUNET:-0}" = 1 ] && { WANT_EMUNET=1; WANT_NET=0; }
 
 # ---- base static objects (present in every tier) ------------------------------
 BASE_OBJS="hotspot/variant-zero/libjvm/objs/static/*.o \
@@ -87,8 +94,10 @@ fi
 # ---- netstub (shared by GL + NET) + NET socket proxy --------------------------
 # One netstub for both: the proxy build (-DUSE_PROXY_SOCKETS) when NET is on, the
 # plain stub otherwise. Built once so AWT+GL+net can all live in ONE artifact.
-if [ "$WANT_GL" = 1 ] || [ "$WANT_NET" = 1 ]; then
-  NSFLAG=""; [ "$WANT_NET" = 1 ] && NSFLAG="-DUSE_PROXY_SOCKETS"
+if [ "$WANT_GL" = 1 ] || [ "$WANT_NET" = 1 ] || [ "$WANT_EMUNET" = 1 ]; then
+  # emunet provides its own socketpair, so it also takes -DUSE_PROXY_SOCKETS (which
+  # tells netstub NOT to define socketpair); netstub then contributes only mprotect.
+  NSFLAG=""; { [ "$WANT_NET" = 1 ] || [ "$WANT_EMUNET" = 1 ]; } && NSFLAG="-DUSE_PROXY_SOCKETS"
   emcc -c -O2 $NSFLAG "$JDK/wasm-jvm/native/gl/netstub.c" -I jdk/include -I jdk/include/emscripten -o "$BIN/netstub.o" || { echo NETSTUB_FAIL; exit 1; }
   EXTRA_OBJS="$EXTRA_OBJS $BIN/netstub.o"
 fi
@@ -96,6 +105,23 @@ if [ "$WANT_NET" = 1 ]; then
   emcc -c -O2 -pthread -matomics -mbulk-memory "$JDK/wasm-jvm/framework/kernel/wsps.c" -I jdk/include -I jdk/include/emscripten -o "$BIN/wsps.o" || { echo WSPS_FAIL; exit 1; }
   EXTRA_OBJS="$EXTRA_OBJS $BIN/wsps.o"
   EXTRA_FLAGS="$EXTRA_FLAGS -sPROXY_POSIX_SOCKETS -lwebsocket.js -Wl,--wrap=read -Wl,--wrap=write -Wl,--wrap=close -Wl,--wrap=readv -Wl,--wrap=writev"
+fi
+if [ "$WANT_EMUNET" = 1 ]; then
+  # In-sandbox loopback: strong socket defs (need PROXY_POSIX_SOCKETS to suppress
+  # musl's), but NO -lwebsocket.js and NO relay. Wrap the fd-routed syscalls plus
+  # poll/fcntl (NIO selectors + non-blocking config). -DEMUNET drops the launcher's
+  # relay boot-gate and keeps its emunet_* entry points exported for the browser.
+  emcc -c -O2 -pthread -matomics -mbulk-memory "$JDK/wasm-jvm/framework/net/emunet.c" -I jdk/include -I jdk/include/emscripten -o "$BIN/emunet.o" || { echo EMUNET_FAIL; exit 1; }
+  EXTRA_OBJS="$EXTRA_OBJS $BIN/emunet.o"
+  # Intercept the whole socket surface via --wrap (musl keeps the __real_* originals
+  # for non-emu fds), so NO PROXY_POSIX_SOCKETS and NO -lwebsocket.js are needed.
+  # emunet_* are exported via EMSCRIPTEN_KEEPALIVE; ccall/cwrap (added to the base
+  # link's EXPORTED_RUNTIME_METHODS) let the JS client marshal byte arrays.
+  EMUNET_WRAPS="socket socketpair bind listen connect accept accept4 shutdown \
+    getsockname getpeername getsockopt setsockopt send recv sendto recvfrom \
+    read write close readv writev poll fcntl"
+  for w in $EMUNET_WRAPS; do EXTRA_FLAGS="$EXTRA_FLAGS -Wl,--wrap=$w"; done
+  EXTRA_FLAGS="$EXTRA_FLAGS -DEMUNET"
 fi
 
 # ---- generate the static JNI symbol table from this tier's objects ------------
@@ -153,7 +179,7 @@ emcc web/launcher_web.c "$BIN/symtab.o" $EXTRA_OBJS $BASE_OBJS \
   -sINITIAL_MEMORY=1610612736 -sSTACK_SIZE=8388608 -sWASM_BIGINT -sERROR_ON_UNDEFINED_SYMBOLS=0 -sEXIT_RUNTIME=1 \
   -lidbfs.js -sALLOW_TABLE_GROWTH \
   -sEXPORT_NAME=createJVM -sMODULARIZE=1 -sFORCE_FILESYSTEM=1 \
-  -sEXPORTED_RUNTIME_METHODS=FS,IDBFS,ENV,callMain,addRunDependency,removeRunDependency,addFunction,HEAPU8,HEAP32 \
+  -sEXPORTED_RUNTIME_METHODS=FS,IDBFS,ENV,callMain,addRunDependency,removeRunDependency,addFunction,HEAPU8,HEAP32,ccall,cwrap \
   $DATA_PRELOADS \
   -o "$OUT" 2>&1 | grep -iE "error:|duplicate symbol" | head
 DATA_MB=$(( $(wc -c < "web/jvm-$TIER$SUF.data" 2>/dev/null || echo 0) / 1048576 ))

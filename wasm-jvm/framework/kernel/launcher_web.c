@@ -95,11 +95,13 @@ int main(int argc, char** argv) {
     vm_args.options = opts;
     vm_args.ignoreUnrecognized = JNI_TRUE;
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(EMUNET)
     /* If /work/bridge holds a WebSocket URL, wire the JVM's POSIX sockets to the
      * websocket_to_posix_proxy relay. Connect it BEFORE JNI_CreateJavaVM so the
      * proxied socket layer is live during VM init (which may touch sockets under
-     * PROXY_POSIX_SOCKETS), avoiding a deadlock. */
+     * PROXY_POSIX_SOCKETS), avoiding a deadlock.
+     * (Skipped in the emunet tier: sockets are served by an in-sandbox loopback
+     * stack — emunet.c — so there is no relay to connect.) */
     {
         char url[256];
         if (read_line_file("/work/bridge", url, sizeof(url))) {

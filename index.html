@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenJDK 21 on WebAssembly</title>
+<meta name="description" content="OpenJDK 21 (HotSpot Zero + bytecode→wasm JIT) running entirely in the browser.">
+<link rel="stylesheet" href="assets/site.css">
+<script src="coi-serviceworker.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <span class="logo">☕</span>
+  <h1>OpenJDK 21 on <b>WebAssembly</b></h1>
+  <span class="tag">HotSpot Zero + JIT</span>
+  <span class="spacer"></span>
+  <nav>
+    <a href="repl.html">REPL</a>
+    <a href="swing.html">Swing</a>
+    <a href="gl.html">3D</a>
+    <a href="fs.html">Files</a>
+    <a href="net.html">Net</a>
+    <a href="integrate.html">Docs</a>
+    <a href="https://github.com/totisai/jdk21u">Source</a>
+  </nav>
+</div>
+
+<section class="hero">
+  <h2>A real JVM, running in your <b>browser tab</b></h2>
+  <p>
+    This is OpenJDK 21's HotSpot interpreter (Zero) compiled to WebAssembly, with a
+    bytecode-to-wasm JIT. It compiles and runs Java entirely client-side — no server,
+    no round-trips. Everything below is a static site served from GitHub Pages.
+  </p>
+</section>
+
+<div class="cards">
+  <a class="card" href="swing.html">
+    <div class="ico">🎨</div>
+    <h3>Swing / Java2D demo</h3>
+    <p>A Swing application rendering through Java2D onto an HTML canvas — real
+       AWT peers, painted frame-by-frame from inside the wasm JVM. Boots in ~2s.</p>
+  </a>
+  <a class="card" href="repl.html">
+    <div class="ico">⌨️</div>
+    <h3>Live javac REPL</h3>
+    <p>Edit Java, compile it with the in-VM <code>javac</code>, and run it — console
+       output streams straight back. The VM stays warm, so re-runs take ~1s.</p>
+  </a>
+  <a class="card" href="gl.html">
+    <div class="ico">🧊</div>
+    <h3>3D / WebGL demo</h3>
+    <p>A Java program issuing OpenGL calls through JNI, translated to WebGL and
+       rendered to a canvas — a spinning shaded triangle, same path as the Minecraft port.</p>
+  </a>
+  <a class="card" href="fs.html">
+    <div class="ico">🗂️</div>
+    <h3>Filesystem inspector</h3>
+    <p>Browse the JVM's in-memory filesystem — the JDK modules under <code>/jdk</code>,
+       the app classpath <code>/app</code>, and the <code>/work</code> scratch area.</p>
+  </a>
+  <a class="card" href="net.html">
+    <div class="ico">🌐</div>
+    <h3>Networking demo</h3>
+    <p>Java opens a real TCP socket and fetches a URL over HTTP, tunneled through a
+       local relay. Run the relay, then fetch live sites from inside the VM.</p>
+  </a>
+  <a class="card" href="integrate.html">
+    <div class="ico">📘</div>
+    <h3>Integration guide</h3>
+    <p>How to embed this JVM in your own web app — load a bundle, boot it, compile
+       source, wire a canvas for graphics/input, and add networking via the relay.</p>
+  </a>
+</div>
+
+<p class="note">
+  <b>How it works.</b> The page loads an ~8&nbsp;MB wasm build of libjvm plus the JDK
+  runtime data (~25&nbsp;MB gzipped, decompressed in the browser). A service worker
+  adds the cross-origin isolation headers that <code>SharedArrayBuffer</code> (wasm
+  threads) needs, since GitHub Pages can't set them itself. First load fetches the
+  runtime once, then it's cached.
+</p>
+
+<footer>
+  <span>OpenJDK 21 → wasm32 (emscripten, Zero)</span>
+  <span>Interpreter JIT: bytecode → WebAssembly</span>
+  <a href="https://github.com/totisai/jdk21u">GitHub</a>
+</footer>
+</body>
+</html>

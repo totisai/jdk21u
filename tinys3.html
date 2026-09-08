@@ -9,8 +9,11 @@
 <style>
   html,body{height:100%}
   body{margin:0;overflow:hidden;background:#0b0f14}
+  /* id selectors with display:flex/grid otherwise beat the `hidden` attribute */
+  [hidden]{display:none!important}
+  :root{--console-h:180px}
   /* ---- skeleton loader (full viewport during boot) ---- */
-  #skeleton{position:fixed;inset:0;display:flex;flex-direction:column;background:var(--bg);z-index:20}
+  #skeleton{position:fixed;top:0;left:0;right:0;bottom:var(--console-h);display:flex;flex-direction:column;background:var(--bg);z-index:20}
   #skeleton .bar{height:44px;border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:8px;padding:0 14px;background:var(--panel2)}
   #skeleton .dot{width:12px;height:12px;border-radius:50%;background:var(--edge)}
   #skeleton .url{flex:1;max-width:520px;height:22px;border-radius:11px;background:var(--edge);margin-left:10px}
@@ -20,12 +23,12 @@
   .shimmer{background:linear-gradient(90deg,#161b22 25%,#20262e 37%,#161b22 63%);background-size:400% 100%;animation:sh 1.3s ease infinite;border-radius:6px}
   @keyframes sh{0%{background-position:100% 0}100%{background-position:-100% 0}}
   #skeleton .row{height:14px;margin:10px 0}
-  #boot-status{position:fixed;left:0;right:0;bottom:26px;text-align:center;color:var(--dim);font-size:13px;z-index:21}
+  #boot-status{position:fixed;left:0;right:0;bottom:calc(var(--console-h) + 14px);text-align:center;color:var(--dim);font-size:13px;z-index:21}
   #boot-status .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--edge);border-top-color:var(--accent);border-radius:50%;animation:rot .8s linear infinite;vertical-align:-2px;margin-right:8px}
   @keyframes rot{to{transform:rotate(360deg)}}
 
   /* ---- browser-in-browser chrome (full viewport) ---- */
-  #browser{position:fixed;inset:0;display:flex;flex-direction:column;z-index:10}
+  #browser{position:fixed;top:0;left:0;right:0;bottom:var(--console-h);display:flex;flex-direction:column;z-index:10}
   .chrome{height:44px;background:var(--panel2);border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:10px;padding:0 12px;flex:none}
   .lights{display:flex;gap:7px}
   .lights i{width:12px;height:12px;border-radius:50%;display:block}
@@ -64,8 +67,21 @@
   .drop{border:1px dashed var(--edge);border-radius:8px;margin:14px 16px;padding:18px;text-align:center;color:var(--dim);font-size:13px}
   .drop.hot{border-color:var(--accent);color:var(--accent)}
 
+  /* ---- VM console (bottom, always visible) ---- */
+  #vmconsole{position:fixed;left:0;right:0;bottom:0;height:var(--console-h);z-index:40;display:flex;flex-direction:column;
+    background:#07090c;border-top:1px solid var(--edge)}
+  #vmconsole .hd{display:flex;align-items:center;gap:10px;padding:5px 12px;border-bottom:1px solid var(--edge);background:var(--panel2);flex:none}
+  #vmconsole .hd .t{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)}
+  #vmconsole .hd .phase{font-size:12px;color:var(--accent)}
+  #vmconsole .hd .sp{flex:1}
+  #vmconsole .hd button{background:transparent;border:1px solid var(--edge);color:var(--dim);border-radius:5px;font-size:11px;padding:3px 8px;cursor:pointer}
+  #vmlog{flex:1;overflow:auto;margin:0;padding:8px 12px;font-family:var(--mono);font-size:11.5px;line-height:1.45;color:var(--dim);white-space:pre-wrap;word-break:break-word}
+  #vmlog .err{color:var(--err)} #vmlog .ok{color:var(--ok)}
+  body.consoleClosed{--console-h:30px}
+  body.consoleClosed #vmlog{display:none}
+
   /* ---- closable "running on wasm" banner ---- */
-  #wasmban{position:fixed;right:16px;bottom:16px;z-index:30;display:flex;align-items:center;gap:10px;
+  #wasmban{position:fixed;right:16px;bottom:calc(var(--console-h) + 16px);z-index:30;display:flex;align-items:center;gap:10px;
     background:var(--panel);border:1px solid var(--edge);border-left:3px solid var(--accent);border-radius:10px;
     padding:10px 12px;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:300px;font-size:12.5px;color:var(--ink)}
   #wasmban .ico{font-size:16px}
@@ -122,6 +138,13 @@
   <span class="x" id="banx">×</span>
 </div>
 
+<!-- VM console (stdout/stderr from inside the JVM) -->
+<div id="vmconsole">
+  <div class="hd"><span class="t">VM console</span><span class="phase" id="phase">booting…</span><span class="sp"></span>
+    <button id="clearlog">clear</button><button id="togglelog">hide</button></div>
+  <pre id="vmlog"></pre>
+</div>
+
 <script src="jvm/jvm-tinys3.js"></script>
 <script type="module">
 import { S3Client, ListBucketsCommand, CreateBucketCommand, ListObjectsV2Command, PutObjectCommand, GetObjectCommand, DeleteObjectCommand }
@@ -132,15 +155,28 @@ const $ = (id) => document.getElementById(id);
 const bootText = $('boot-text');
 let mod = null, s3 = null, currentBucket = null;
 
+// VM console: show everything the JVM writes to stdout/stderr.
+const vmlog = $('vmlog');
+function vlog(s, cls) {
+  const sp = document.createElement('span'); if (cls) sp.className = cls;
+  sp.textContent = s.endsWith('\n') ? s : s + '\n';
+  vmlog.appendChild(sp); vmlog.scrollTop = vmlog.scrollHeight;
+}
+function phase(t) { $('phase').textContent = t; bootText.textContent = t; }
+$('clearlog').onclick = () => { vmlog.textContent = ''; };
+$('togglelog').onclick = (e) => { document.body.classList.toggle('consoleClosed'); e.target.textContent = document.body.classList.contains('consoleClosed') ? 'show' : 'hide'; };
+window.addEventListener('unhandledrejection', ev => vlog('[unhandled] ' + (ev.reason && (ev.reason.stack || ev.reason.message) || ev.reason), 'err'));
+window.addEventListener('error', ev => vlog('[error] ' + (ev.message || ev.error), 'err'));
+
 // ---- boot the wasm JVM + TinyS3 (baked into /app/lib) --------------------------
 async function boot() {
   if (!window.crossOriginIsolated) throw new Error('not cross-origin isolated (reload to activate the service worker)');
   if (!window.createJVM) throw new Error('runtime failed to load (jvm/jvm-tinys3.js)');
-  bootText.textContent = 'downloading runtime (~62 MB, first load only)…';
+  phase('downloading runtime (~80 MB, first load only)…');
   const gz = await fetch('jvm/jvm-tinys3.data.gz');
   if (!gz.ok) throw new Error('fetch data.gz ' + gz.status);
   const buf = await new Response(gz.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
-  bootText.textContent = 'starting TinyS3 server (Netty) inside the JVM…';
+  phase('starting the JVM + TinyS3 (Netty)…');
   let ready = false;
   mod = await window.createJVM({
     arguments: ['dev.totis.tinys3.Application'],
@@ -157,12 +193,13 @@ async function boot() {
         '--add-opens=java.base/java.nio=ALL-UNNAMED', '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED'].join('\n'));
       M.ENV = M.ENV || {}; M.ENV.TINYS3_ROOT_USER = 'admin'; M.ENV.TINYS3_ROOT_PASSWORD = 'password';
     }],
-    print: s => { if (/Console:|API:\s+http/.test(s)) ready = true; },
-    printErr: () => {},
+    print: s => { if (!/unsupported syscall/.test(s)) vlog(s); if (/Console:|API:\s+http|Started .*Application/.test(s)) ready = true; },
+    printErr: s => { if (!/unsupported syscall/.test(s)) vlog(s, 'err'); },
   });
-  bootText.textContent = 'waiting for the server to bind :8000…';
+  phase('waiting for the server to bind :8000…');
   for (let i = 0; i < 3000 && !ready; i++) await new Promise(r => setTimeout(r, 100));
   if (!ready) throw new Error('TinyS3 did not become ready');
+  phase('ready');
   s3 = new S3Client({
     endpoint: 'http://127.0.0.1:8000', region: 'us-east-1', forcePathStyle: true,
     credentials: { accessKeyId: 'admin', secretAccessKey: 'password' },
@@ -259,8 +296,10 @@ drop.addEventListener('drop', e => { if (e.dataTransfer.files.length) upload(e.d
     $('objects').innerHTML = '<div class="empty">Create or select a bucket to begin.</div>';
     await refreshBuckets();
   } catch (e) {
-    $('boot-text').textContent = 'Error: ' + (e && e.message || e);
-    $('boot-status').querySelector('.spin').style.display = 'none';
+    phase('error');
+    vlog('BOOT ERROR: ' + (e && e.stack || e && e.message || e), 'err');
+    $('boot-text').textContent = 'Error (see VM console below): ' + (e && e.message || e);
+    const spin = $('boot-status').querySelector('.spin'); if (spin) spin.style.display = 'none';
   }
 })();
 </script>

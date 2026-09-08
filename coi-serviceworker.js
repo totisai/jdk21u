@@ -26,6 +26,12 @@ if (typeof window === 'undefined') {
         const r = event.request;
         if (r.cache === 'only-if-cached' && r.mode !== 'same-origin') return;
 
+        // Only rewrite the DOCUMENT (navigation) to carry COOP/COEP — that alone makes
+        // the page cross-origin isolated. Same-origin subresources don't need CORP, so
+        // we must NOT proxy them: re-fetching a large asset (the ~80 MB runtime data)
+        // through the worker fails in some browsers ("respondWith … Load failed").
+        if (r.mode !== 'navigate') return;
+
         const request = (coepCredentialless && r.mode === 'no-cors')
             ? new Request(r, { credentials: 'omit' })
             : r;

@@ -1,0 +1,32 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>persist test</title></head>
+<body>
+<canvas id="glsurface" width="854" height="480"></canvas>
+<script>
+  window.__persist = 'pending';
+  function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=rej;document.body.appendChild(s);});}
+  loadScript('/jvmgl.js').then(() => window.createJVMGL({
+    arguments: ['MCLaunch'],
+    preRun: [ (M) => {
+      try { M.FS.mkdir('/work'); } catch (e) {}
+      if (!M.IDBFS) { window.__persist = 'NO-IDBFS'; return; }
+      try { M.FS.mkdir('/home'); } catch (e) {}
+      try { M.FS.mkdir('/home/web_user'); } catch (e) {}
+      M.FS.mount(M.IDBFS, {}, '/home/web_user');
+      M.addRunDependency('idbfs');
+      M.FS.syncfs(true, () => {
+        try {
+          const c = M.FS.readFile('/home/web_user/marker.txt', { encoding: 'utf8' });
+          window.__persist = 'HIT:' + c;                       // survived a prior run
+        } catch (e) {
+          M.FS.writeFile('/home/web_user/marker.txt', 'saved-at-' + Date.now());
+          window.__persist = 'MISS-wrote';                     // first run
+          M.FS.syncfs(false, () => {});                        // flush to IndexedDB
+        }
+        M.removeRunDependency('idbfs');
+      });
+    } ],
+    print: () => {}, printErr: () => {},
+  }));
+</script>
+</body></html>

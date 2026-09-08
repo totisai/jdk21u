@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>wgl WebGL stress test</title></head>
+<body>
+<canvas id="c" width="128" height="128"></canvas>
+<canvas id="sheet" width="768" height="128"></canvas>
+<pre id="out">running…</pre>
+<script>
+  var Module = {
+    canvas: document.getElementById('c'),
+    onRuntimeInitialized: function () {
+      var rp = Module.cwrap('h_readpixel', 'number', ['number', 'number']);
+      window.wgl = {
+        ready: true,
+        init:    function (w, h) { return Module._h_init(w, h); },
+        rp:      function (x, y) { return rp(x, y) >>> 0; },
+        scene:        function ()   { Module._h_scene(); },
+        sceneOrtho:   function (w,h){ Module._h_scene_ortho(w, h); },
+        sceneTexture: function ()   { Module._h_scene_texture(); },
+        sceneBlend:   function ()   { Module._h_scene_blend(); },
+        sceneDepth:   function ()   { Module._h_scene_depth(); },
+        anim:         function (d)  { Module._h_anim(d); },
+        sceneStress:  function (g)  { Module._h_scene_stress(g); },
+        png:     function () { return Module.canvas.toDataURL('image/png'); },
+        // build an animation contact sheet: render `n` frames across [0,360)
+        // into the wide 'sheet' canvas, return it as a PNG data URL.
+        animSheet: function (n) {
+          var sc = document.getElementById('sheet');
+          var ctx = sc.getContext('2d');
+          var fw = sc.width / n, fh = sc.height;
+          for (var i = 0; i < n; i++) {
+            Module._h_anim(i * 360 / n);
+            ctx.drawImage(Module.canvas, i * fw, 0, fw, fh);
+          }
+          return sc.toDataURL('image/png');
+        }
+      };
+      document.getElementById('out').textContent = 'ready';
+    }
+  };
+</script>
+<script src="harness.js"></script>
+</body>
+</html>

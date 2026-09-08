@@ -432,7 +432,7 @@ Java_sun_nio_ch_Net_localPort(JNIEnv *env, jclass clazz, jobject fdo)
     SOCKETADDRESS sa;
     socklen_t sa_len = sizeof(SOCKETADDRESS);
     if (getsockname(fdval(env, fdo), &sa.sa, &sa_len) < 0) {
-#ifdef _ALLBSD_SOURCE
+#if defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
         /*
          * XXXBSD:
          * ECONNRESET is specific to the BSDs. We can not return an error,
@@ -465,7 +465,7 @@ Java_sun_nio_ch_Net_localInetAddress(JNIEnv *env, jclass clazz, jobject fdo)
     socklen_t sa_len = sizeof(SOCKETADDRESS);
     int port;
     if (getsockname(fdval(env, fdo), &sa.sa, &sa_len) < 0) {
-#ifdef _ALLBSD_SOURCE
+#if defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
         /*
          * XXXBSD:
          * ECONNRESET is specific to the BSDs. We can not return an error,

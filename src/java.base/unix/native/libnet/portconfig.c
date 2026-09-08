@@ -28,7 +28,7 @@
 #include <unistd.h>
 #include <errno.h>
 
-#if defined(_ALLBSD_SOURCE)
+#if defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
 #include <sys/sysctl.h>
 #endif
 
@@ -60,7 +60,7 @@ static int getPortRange(struct portrange *range)
         }
         return -1;
     }
-#elif defined(_ALLBSD_SOURCE)
+#elif defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
     {
         int ret;
         size_t size = sizeof(range->lower);

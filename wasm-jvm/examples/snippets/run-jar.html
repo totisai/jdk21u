@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8"><title>WasmJVM · run a jar</title>
+<style>body{font:14px system-ui;margin:20px;max-width:800px}
+pre{background:#111;color:#0f0;padding:12px;white-space:pre-wrap;min-height:100px}
+button{font-size:15px;padding:6px 14px}</style>
+<h2>WasmJVM — boot a runnable JAR (base tier)</h2>
+<p>Fetches <code>demo.jar</code> at run time, stages it into the JVM's filesystem,
+and runs its <code>Main-Class</code> with program arguments — the "app from a jar"
+path.</p>
+<p><button id="run">▶ Run demo.jar</button></p>
+<pre id="out"></pre>
+<script type="module">
+import { WasmJVM } from '../wasmjvm.js';
+const out = document.getElementById('out');
+const log = s => { out.textContent += s + '\n'; };
+document.getElementById('run').onclick = async () => {
+  out.textContent = ''; document.getElementById('run').disabled = true;
+  const jvm = new WasmJVM({
+    runtime: { basePath: '../', tier: 'base' },
+    app: {
+      mainClass: 'DemoApp',                                  // from the jar's manifest
+      jars: [ { path: '/app/lib/demo.jar', url: '../apps/demo.jar' } ],
+      args: ['hello', 'from-host'],                          // → main(String[])
+    },
+    onStdout: log, onStderr: log,
+    onExit: () => { document.getElementById('run').disabled = false; },
+  });
+  await jvm.start();
+};
+</script>

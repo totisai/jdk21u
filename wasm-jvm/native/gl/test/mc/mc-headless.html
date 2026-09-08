@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Minecraft on wasm — headless</title></head>
+<body>
+<!-- Direct-present mode: MC's WebGL frames are committed straight to this canvas
+     (no CPU readback). Puppeteer screenshots it. -->
+<canvas id="glsurface" width="854" height="480"></canvas>
+<script>
+  window.__log = [];
+  window.__frames = 0;
+  window.__frameDims = [854, 480, 854*480];
+  window.__done = false;
+  window.__seq = 0;
+  function log(s) { window.__log.push(String(s)); }
+
+  // inject an input line into /work/ctrl exactly like index.html does
+  window.__send = function (state, x, y) {
+    if (!mod) return;
+    window.__seq++;
+    const line = window.__seq + ' ' + state + ' ' + x + ' ' + y + '\n';
+    try {
+      const enc = new TextEncoder().encode(line);
+      const fd = mod.FS.open('/work/ctrl', 'a');
+      mod.FS.write(fd, enc, 0, enc.length);
+      mod.FS.close(fd);
+    } catch (e) { console.log('send err ' + e); }
+  };
+
+  function loadScript(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error('load ' + src));
+      document.body.appendChild(s);
+    });
+  }
+
+  let mod = null;
+  loadScript('/jvmgl.js')
+    .then(() => window.createJVMGL({
+      arguments: ['MCLaunch'],
+      preRun: [ (M) => { mod = M; try { M.FS.mkdir('/work'); } catch (e) {} } ],
+      print:    (s) => log(s),
+      printErr: (s) => log(s),
+      onExit:   (code) => { log('[exit ' + code + ']'); window.__done = true; },
+    }).then(() => log('[factory resolved]'),
+            (e) => { log('[factory error] ' + (e && e.message || e)); window.__done = true; }))
+    .catch((e) => { log('[loadScript error] ' + e.message); window.__done = true; });
+
+  // MC presents frames directly to #glsurface; count them via /work/seq (cheap).
+  let lastSeq = -1;
+  function poll() {
+    if (mod) {
+      try {
+        const seq = mod.FS.readFile('/work/seq', { encoding: 'utf8' });
+        if (seq !== lastSeq) { lastSeq = seq; window.__frames++; }
+      } catch (_) {}
+    }
+    requestAnimationFrame(poll);
+  }
+  requestAnimationFrame(poll);
+</script>
+</body>
+</html>

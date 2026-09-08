@@ -29,6 +29,7 @@
 #include "gc/shared/threadLocalAllocBuffer.inline.hpp"
 #include "gc/shared/tlab_globals.hpp"
 #include "interpreter/bytecodeHistogram.hpp"
+#include "interpreter/wasm/wasmJit.hpp"
 #include "interpreter/zero/bytecodeInterpreter.inline.hpp"
 #include "interpreter/interpreter.hpp"
 #include "interpreter/interpreterRuntime.hpp"
@@ -298,7 +299,46 @@ JRT_END
 
 #define METHOD istate->method()
 #define GET_METHOD_COUNTERS(res)
+// WasmJit OSR: on a hot backward branch, if the method is compiled and OSR-eligible,
+// enter the JIT'd body at the loop head (pc is already at the target) with the current
+// frame locals, then return the method's result to the caller. Empty operand stack at a
+// block boundary is guaranteed by the JIT's compile-time rule, so no stack transfer is
+// needed. Gated (WASMJIT_OSR) inside osr_ready, which returns -1 when disabled.
+#ifdef __EMSCRIPTEN__
+#define DO_BACKEDGE_CHECKS(skip, branch_pc)                                              \
+  if ((skip) < 0) {                                                                      \
+    int _osrblk = WasmJit::osr_ready(METHOD, BCI());                                     \
+    if (_osrblk > 0) {                                                                   \
+      unsigned char _at[8], _rt = 0; int _na = WasmJit::describe(METHOD, _at, &_rt);     \
+      intptr_t _fn = WasmJit::compiled_entry(METHOD);                                    \
+      if (_fn != 0) {                                                                    \
+        THREAD->_wasmjit_osr_bb = _osrblk;                                               \
+        uint64_t _args[10]; int _sl = 0;                                                 \
+        for (int _i = 0; _i < _na; _i++) { switch (_at[_i]) {                            \
+          case 0: _args[_i] = (uint64_t)(uint32_t)LOCALS_INT(_sl); _sl += 1; break;      \
+          case 1: _args[_i] = (uint64_t)LOCALS_LONG(_sl); _sl += 2; break;               \
+          case 2: { jfloat _f = LOCALS_FLOAT(_sl); uint32_t _b; memcpy(&_b,&_f,4); _args[_i]=_b; _sl += 1; } break; \
+          case 3: { jdouble _d = LOCALS_DOUBLE(_sl); uint64_t _b; memcpy(&_b,&_d,8); _args[_i]=_b; _sl += 2; } break; \
+          case 4: _args[_i] = 0; _sl += 1; break; } }                                    \
+        _args[_na] = (uint64_t)(uintptr_t)locals;                                        \
+        uint64_t _res = WasmJit::invoke(_fn, _na + 1, _args);                            \
+        if (THREAD->has_pending_exception()) { THREAD->set_do_not_unlock_if_synchronized(true); goto handle_exception; } \
+        THREAD->set_do_not_unlock_if_synchronized(true);                                 \
+        switch (_rt) {                                                                   \
+          case 1: SET_STACK_LONG((jlong)_res, 1); MORE_STACK(2); break;                  \
+          case 2: { uint32_t _b=(uint32_t)_res; jfloat _f; memcpy(&_f,&_b,4); SET_STACK_FLOAT(_f,0); MORE_STACK(1); } break; \
+          case 3: { jdouble _d; memcpy(&_d,&_res,8); SET_STACK_DOUBLE(_d,1); MORE_STACK(2); } break; \
+          case 4: SET_STACK_OBJECT(cast_to_oop((intptr_t)(uint32_t)_res), 0); MORE_STACK(1); break; \
+          case 5: break;                                                                 \
+          default: SET_STACK_INT((jint)(uint32_t)_res, 0); MORE_STACK(1); break;         \
+        }                                                                                \
+        goto handle_return;                                                              \
+      }                                                                                  \
+    }                                                                                    \
+  }
+#else
 #define DO_BACKEDGE_CHECKS(skip, branch_pc)
+#endif
 
 /*
  * For those opcodes that need to have a GC point on a backwards branch
@@ -604,6 +644,50 @@ void BytecodeInterpreter::run(interpreterState istate) {
       return;
     }
     case method_entry: {
+#ifdef __EMSCRIPTEN__
+      // WasmJit: if this method has a run-time-compiled wasm body, call it
+      // instead of interpreting (see wasmJit.cpp). v1: static, (I*)I, name jit*.
+      {
+        intptr_t _jitfn = WasmJit::compiled_entry(METHOD);
+        if (_jitfn != 0) {
+          // i64-widened typed ABI: marshal each arg to an i64 bit-pattern, call,
+          // then narrow the i64 result to the method's return type.
+          unsigned char _at[8], _rt = 0;
+          int _na = WasmJit::describe(METHOD, _at, &_rt);
+          uint64_t _args[10];
+          int _slot = 0;
+          for (int _i = 0; _i < _na; _i++) {
+            switch (_at[_i]) {
+              case 0: _args[_i] = (uint64_t)(uint32_t)LOCALS_INT(_slot); _slot += 1; break;
+              case 1: _args[_i] = (uint64_t)LOCALS_LONG(_slot);          _slot += 2; break;
+              case 2: { jfloat _f = LOCALS_FLOAT(_slot);  uint32_t _b; memcpy(&_b,&_f,4); _args[_i]=_b; _slot += 1; } break;
+              case 3: { jdouble _d = LOCALS_DOUBLE(_slot); uint64_t _b; memcpy(&_b,&_d,8); _args[_i]=_b; _slot += 2; } break;
+              case 4: _args[_i] = 0; _slot += 1; break;  // object arg: re-read from frame in JIT'd code
+            }
+          }
+          // trailing param: the frame `locals` base, so JIT'd code can re-read
+          // object refs from GC-scanned frame slots across safepoints (C1).
+          _args[_na] = (uint64_t)(uintptr_t)locals;
+          uint64_t _res = WasmJit::invoke(_jitfn, _na + 1, _args);
+          // A JIT'd getfield on null sets a pending NPE and returns early; the
+          // method has no handler (gated at compile time), so propagate it.
+          if (THREAD->has_pending_exception()) {
+            THREAD->set_do_not_unlock_if_synchronized(true);
+            goto handle_exception;
+          }
+          THREAD->set_do_not_unlock_if_synchronized(true);
+          switch (_rt) {
+            case 1: SET_STACK_LONG((jlong)_res, 1); MORE_STACK(2); break;
+            case 2: { uint32_t _b=(uint32_t)_res; jfloat _f;  memcpy(&_f,&_b,4); SET_STACK_FLOAT(_f,0);  MORE_STACK(1); } break;
+            case 3: { jdouble _d; memcpy(&_d,&_res,8);        SET_STACK_DOUBLE(_d,1); MORE_STACK(2); } break;
+            case 4: SET_STACK_OBJECT(cast_to_oop((intptr_t)(uint32_t)_res), 0); MORE_STACK(1); break;  // object return
+            case 5: break;                                    // void: push nothing
+            default: SET_STACK_INT((jint)(uint32_t)_res, 0);  MORE_STACK(1); break;
+          }
+          goto handle_return;
+        }
+      }
+#endif
       THREAD->set_do_not_unlock_if_synchronized(true);
 
       // Lock method if synchronized.

@@ -43,6 +43,15 @@ JNIEXPORT void JNICALL
 Java_sun_nio_ch_UnixDispatcher_init(JNIEnv *env, jclass clazz)
 {
     int sp[2];
+#ifdef __EMSCRIPTEN__
+    // emscripten has no socketpair(PF_UNIX) (returns ENOSYS). The preClose fd is
+    // only used to interrupt blocking channel I/O without a race; the wasm sandbox
+    // has no such blocking-interrupt need. Leave preCloseFD = -1 so preClose0() is
+    // a no-op, and let init() succeed (else ServerSocketChannelImpl.<clinit> fails
+    // and all NIO server sockets are unusable -- breaks e.g. IntelliJ's SocketLock).
+    preCloseFD = -1;
+    return;
+#endif
     if (socketpair(PF_UNIX, SOCK_STREAM, 0, sp) < 0) {
         JNU_ThrowIOExceptionWithLastError(env, "socketpair failed");
         return;

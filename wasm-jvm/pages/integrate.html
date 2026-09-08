@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Integration guide — OpenJDK on WebAssembly</title>
+<link rel="stylesheet" href="assets/site.css">
+<style>
+  article{max-width:820px;margin:0 auto;padding:28px 24px 60px;line-height:1.6}
+  article h2{font-size:24px;margin:0 0 6px}
+  article h3{font-size:16px;margin:34px 0 8px;padding-top:14px;border-top:1px solid var(--edge)}
+  article p{color:var(--ink);font-size:14px}
+  article p.lead{color:var(--dim);font-size:15px}
+  article ul{color:var(--ink);font-size:14px;padding-left:20px}
+  article li{margin:4px 0}
+  article code{font-family:var(--mono);color:var(--accent2);background:#0b0f14;padding:1px 5px;border-radius:4px;font-size:12.5px}
+  pre{background:#0b0f14;border:1px solid var(--edge);border-radius:8px;padding:14px;overflow:auto;
+    font-family:var(--mono);font-size:12.5px;line-height:1.5;color:var(--ink)}
+  pre .c{color:var(--faint)}
+  table{border-collapse:collapse;font-size:13px;margin:8px 0;width:100%}
+  th,td{border:1px solid var(--edge);padding:6px 10px;text-align:left}
+  th{color:var(--dim);font-weight:600}
+  .note{background:#161b22;border:1px solid var(--edge);border-left:3px solid var(--accent);
+    border-radius:6px;padding:10px 14px;color:var(--dim);font-size:13px;margin:14px 0}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="logo">☕</span>
+  <h1>Embedding the <b>wasm JVM</b></h1>
+  <span class="spacer"></span>
+  <nav><a href="index.html">Home</a><a href="repl.html">REPL</a><a href="swing.html">Swing</a><a href="gl.html">3D</a><a href="fs.html">Files</a><a href="net.html">Net</a><a href="integrate.html">Docs</a></nav>
+</div>
+
+<article>
+  <h2>Integration guide</h2>
+  <p class="lead">How to run OpenJDK 21 inside your own web app: load a runtime bundle,
+     boot it, feed it a program, and (optionally) wire a canvas for graphics and input.
+     Everything runs client-side — no server.</p>
+
+  <h3>1. Cross-origin isolation (required)</h3>
+  <p>The JVM uses wasm threads, which need <code>SharedArrayBuffer</code>, which needs the
+     page to be <b>cross-origin isolated</b>. That normally requires two response headers:</p>
+  <pre>Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp</pre>
+  <p>If you control the server, send those. If you don't (e.g. GitHub Pages), drop in
+     <a href="https://github.com/gzuidhof/coi-serviceworker">coi-serviceworker.js</a> — a
+     service worker that adds them client-side — as the first script in your page:</p>
+  <pre>&lt;script src="coi-serviceworker.js"&gt;&lt;/script&gt;</pre>
+  <p>Check <code>self.crossOriginIsolated === true</code> before booting.</p>
+
+  <h3>2. Pick a runtime bundle</h3>
+  <p>Each bundle is a <code>&lt;name&gt;.js</code> loader plus a <code>.wasm</code>, a
+     <code>.worker.js</code>, and a JDK data image. It exposes one global factory.</p>
+  <table>
+    <tr><th>Bundle</th><th>Factory</th><th>Capabilities</th></tr>
+    <tr><td>jvm-base</td><td><code>createJVM</code></td><td>plain Java + in-VM <code>javac</code></td></tr>
+    <tr><td>jvmawt</td><td><code>createJVM</code></td><td>Swing / AWT / Java2D → canvas</td></tr>
+    <tr><td>jvmgl</td><td><code>createJVMGL</code></td><td>AWT + OpenGL→WebGL</td></tr>
+  </table>
+  <p>Ship the JDK data image gzipped and decompress it in the browser, then hand the bytes
+     to the runtime through <code>Module.getPreloadedPackage</code>:</p>
+  <pre><span class="c">// fetch + gunzip the JDK image once</span>
+const gz = await fetch('jvm/jvm-base.data.gz');
+const data = await new Response(
+    gz.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();</pre>
+
+  <h3>3. Boot and run a program</h3>
+  <p>The factory takes an Emscripten module config. <code>arguments[0]</code> is the main
+     class; write control files into <code>/work</code> in <code>preRun</code>; capture
+     output with <code>print</code>/<code>printErr</code>.</p>
+  <pre>&lt;script src="jvm/jvm-base.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+createJVM({
+  arguments: ['Hello'],                       <span class="c">// main class on the /app classpath</span>
+  getPreloadedPackage: () =&gt; data,            <span class="c">// the gunzipped image from step 2</span>
+  preRun: [ M =&gt; { M.FS.mkdir('/work'); } ],
+  print:    s =&gt; console.log(s),
+  printErr: s =&gt; console.error(s),
+});
+&lt;/script&gt;</pre>
+  <p>The launcher reads these optional <code>/work</code> files before starting the VM:</p>
+  <table>
+    <tr><th>File</th><th>Effect</th></tr>
+    <tr><td><code>/work/classpath</code></td><td>one line → <code>-Djava.class.path</code> (default <code>/app</code>)</td></tr>
+    <tr><td><code>/work/addmods</code></td><td>one line → <code>--add-modules</code></td></tr>
+    <tr><td><code>/work/args</code></td><td>N lines → program args</td></tr>
+    <tr><td><code>/work/vmopts</code></td><td>N lines → extra JVM options</td></tr>
+  </table>
+
+  <h3>4. Compile from source (in-VM javac)</h3>
+  <p>The base bundle bakes <code>jdk.compiler</code> plus two driver classes. Write your
+     source to <code>/work/src.java</code> and run a driver:</p>
+  <ul>
+    <li><code>Runner</code> — compiles, runs <code>main</code>, exits. One-shot.</li>
+    <li><code>ReplServer</code> — stays resident and keeps the VM <b>warm</b>: it loops on a
+        <code>/work/req</code> counter, recompiling/running on each bump and writing the
+        request id to <code>/work/resp</code> when done. First run boots (~5s); later runs ~1s.</li>
+  </ul>
+  <pre><span class="c">// warm REPL: boot ReplServer once…</span>
+createJVM({ arguments:['ReplServer'], getPreloadedPackage:()=&gt;data,
+  preRun:[M=&gt;{ mod=M; M.FS.mkdir('/work'); M.FS.writeFile('/work/req','0'); }],
+  print:onOut, printErr:onErr });
+
+<span class="c">// …then for each run, write the source and bump the request:</span>
+let seq = 0;
+function run(source){
+  mod.FS.writeFile('/work/src.java', source);
+  mod.FS.writeFile('/work/req', String(++seq));
+  <span class="c">// poll /work/resp until it equals String(seq) → run finished</span>
+}</pre>
+
+  <h3>5. Graphics and input</h3>
+  <p>AWT/GL apps publish frames and read input over a small <code>/work</code> wire protocol.
+     Rather than implement it, use the framework's reusable <code>Screen</code> module — it
+     presents frames to a canvas and forwards mouse/keyboard back to the app:</p>
+  <pre>import { Screen } from './jvm/screen.js';
+
+const screen = new Screen(canvas, {
+  present: '2d',        <span class="c">// blit RGBA frames (or 'webgl')</span>
+  input:   true,        <span class="c">// forward pointer + keyboard to the app</span>
+  mousemove: true,
+  getModule: () =&gt; mod, <span class="c">// {{ FS, HEAP32, HEAPU8 }} accessor</span>
+}).start();</pre>
+  <p><code>Screen</code> maps canvas coordinates through any CSS scaling, so you can display
+     a small framebuffer at any size. Call <code>screen.stop()</code> to detach.</p>
+
+  <h3>6. Networking (real TCP via a relay)</h3>
+  <p>Browsers can't open raw TCP sockets, so a <code>java.net.Socket</code> /
+     <code>HttpURLConnection</code> is tunneled over a single WebSocket to a small
+     native relay that performs the actual TCP + DNS. Verified end-to-end: an
+     <code>HttpURLConnection</code> GET of <code>http://example.com/</code> returns a real
+     <code>HTTP 200</code> and body.</p>
+  <p><b>Pieces.</b> A networking-enabled runtime is a distinct bundle (a socket-proxy
+     build, e.g. <code>jvm-*-net</code>) linked with <code>-sPROXY_POSIX_SOCKETS</code> plus a
+     patched <code>wsps.c</code> that routes the JDK's <code>read/write/close/poll</code> over the
+     bridge. The relay is <code>framework/net/tcp-relay.cjs</code> (Node + the <code>ws</code> library,
+     speaking Emscripten's <code>websocket_to_posix_proxy</code> protocol over node
+     <code>net</code>/<code>dns</code>).</p>
+  <p><b>Run it.</b></p>
+  <pre><span class="c"># 1. start the relay (defaults to port 8114)</span>
+node framework/net/tcp-relay.cjs 8114
+
+<span class="c"># 2. tell the VM which relay to use, before boot, by writing /work/bridge</span>
+createJVM({
+  arguments: ['Main'],
+  getPreloadedPackage: () =&gt; data,
+  preRun: [ M =&gt; {
+    M.FS.mkdir('/work');
+    M.FS.writeFile('/work/bridge', 'ws://localhost:8114/');  <span class="c">// the relay's WS URL</span>
+  } ],
+});</pre>
+  <p>The launcher connects the bridge and waits for the WebSocket to open <em>before</em>
+     starting Java, so sockets are live during VM init. The socket-proxy build blocks at
+     boot when no relay is connected, which is why networking is a separate bundle used
+     only when a relay is configured.</p>
+  <div class="note">
+    In Node, set <code>globalThis.WebSocket = require('ws')</code> before loading the module
+    (the built-in undici WebSocket doesn't complete the handshake). In a browser the native
+    <code>WebSocket</code> is used directly. A benign <code>SocketException: Bad file descriptor</code>
+    can appear at connection teardown after the body is fully read.
+  </div>
+
+  <h3>Gotchas</h3>
+  <ul>
+    <li><b>Monolithic vs. packs.</b> A bundle either bakes its JDK image (monolithic, fed via
+        <code>getPreloadedPackage</code>) or loads modular <em>packs</em> at boot — not both.
+        Writing module files into a monolithic bundle's <code>/jdk</code> or <code>/app</code>
+        at boot double-stages and freezes with an <code>mknod EEXIST</code>.</li>
+    <li><b>Serve <code>.gz</code> raw.</b> Don't set <code>Content-Encoding: gzip</code> on the
+        data image — the page decompresses it itself with <code>DecompressionStream</code>.</li>
+    <li><b>First load is large</b> (tens of MB); it caches after that.</li>
+  </ul>
+
+  <div class="note">
+    For a higher-level, capability-driven API (auto tier selection, jar staging, persistent
+    storage, networking), the framework also ships an SDK — <code>wasmjvm.js</code>,
+    <code>new WasmJVM({...}).start()</code> — used with the modular-pack artifacts.
+  </div>
+</article>
+
+<footer>
+  <span>OpenJDK 21 → wasm32 (emscripten, Zero)</span>
+  <a href="https://github.com/totisai/jdk21u">GitHub</a>
+</footer>
+</body>
+</html>

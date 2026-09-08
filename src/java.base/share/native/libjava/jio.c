@@ -27,7 +27,7 @@
 
 #include "jni.h"
 
-#ifndef STATIC_BUILD
+#if !defined(STATIC_BUILD) && !defined(__EMSCRIPTEN__)
 
 /* This is a temporary solution until we figure out how to let native
  * libraries use jio_* without linking with the VM.

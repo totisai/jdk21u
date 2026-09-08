@@ -54,7 +54,9 @@
 
 #if !defined(__APPLE__) && !defined(__NetBSD__)
 #include <pthread.h>
-# include <pthread_np.h> /* For pthread_attr_get_np */
+#ifndef __EMSCRIPTEN__
+# include <pthread_np.h>
+#endif /* For pthread_attr_get_np */
 #endif
 
 address os::current_stack_pointer() {
@@ -181,7 +183,18 @@ static void current_stack_region(address *bottom, size_t *size) {
   address stack_top;
   size_t stack_bytes;
 
-#ifdef __APPLE__
+#if defined(__EMSCRIPTEN__)
+  // Emscripten's musl provides pthread_getattr_np + pthread_attr_getstack.
+  pthread_attr_t attr;
+  int rslt = pthread_getattr_np(pthread_self(), &attr);
+  if (rslt != 0)
+    fatal("pthread_getattr_np failed with error = " INT32_FORMAT, rslt);
+  if (pthread_attr_getstack(&attr, (void **) &stack_bottom, &stack_bytes) != 0) {
+    fatal("Can not locate current stack attributes!");
+  }
+  pthread_attr_destroy(&attr);
+  stack_top = stack_bottom + stack_bytes;
+#elif defined(__APPLE__)
   pthread_t self = pthread_self();
   stack_top = (address) pthread_get_stackaddr_np(self);
   stack_bytes = pthread_get_stacksize_np(self);

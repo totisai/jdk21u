@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8"><title>WasmJVM · compile &amp; run</title>
+<style>body{font:14px system-ui;margin:20px;max-width:800px}
+textarea{width:100%;height:220px;font:13px monospace}
+pre{background:#111;color:#0f0;padding:12px;white-space:pre-wrap;min-height:80px}
+button{font-size:15px;padding:6px 14px}</style>
+<h2>WasmJVM — compile &amp; run Java source (base tier)</h2>
+<p>The Java below is compiled by the in-VM <code>javac</code> and run on the wasm JVM.</p>
+<textarea id="src">public class Main {
+    public static void main(String[] args) {
+        System.out.println("Compiled by javac and run on wasm — JDK " + System.getProperty("java.version"));
+        int sum = 0; for (int i = 1; i <= 100; i++) sum += i;
+        System.out.println("sum(1..100) = " + sum);
+    }
+}</textarea>
+<p><button id="run">▶ Compile &amp; Run</button></p>
+<pre id="out"></pre>
+<script type="module">
+import { WasmJVM } from '../wasmjvm.js';
+const out = document.getElementById('out');
+const log = s => { out.textContent += s + '\n'; };
+document.getElementById('run').onclick = async () => {
+  out.textContent = ''; document.getElementById('run').disabled = true;
+  const jvm = new WasmJVM({
+    runtime: { basePath: '../', tier: 'base' },
+    app: { source: document.getElementById('src').value },
+    onStdout: log, onStderr: log,
+    onExit: () => { document.getElementById('run').disabled = false; },
+  });
+  await jvm.start();
+};
+</script>

@@ -424,6 +424,13 @@ NetworkPerformanceInterface::NetworkPerformance::~NetworkPerformance() {
 }
 
 int NetworkPerformanceInterface::NetworkPerformance::network_utilization(NetworkInterface** network_interfaces) const {
+#ifdef __EMSCRIPTEN__
+  // Emscripten's musl-derived libc lacks the BSD sysctl network-route
+  // enumeration interface (CTL_NET/PF_ROUTE/NET_RT_IFLIST2, if_msghdr2,
+  // sockaddr_dl, RTM_IFINFO2). No portable equivalent exists, so report
+  // that the query is not implemented on this platform.
+  return FUNCTIONALITY_NOT_IMPLEMENTED;
+#else
   size_t len;
   int mib[] = {CTL_NET, PF_ROUTE, /* protocol number */ 0, /* address family */ 0, NET_RT_IFLIST2, /* NET_RT_FLAGS mask*/ 0};
   if (sysctl(mib, sizeof(mib) / sizeof(mib[0]), nullptr, &len, nullptr, 0) != 0) {
@@ -463,6 +470,7 @@ int NetworkPerformanceInterface::NetworkPerformance::network_utilization(Network
   *network_interfaces = ret;
 
   return OS_OK;
+#endif // __EMSCRIPTEN__
 }
 
 NetworkPerformanceInterface::NetworkPerformanceInterface() {

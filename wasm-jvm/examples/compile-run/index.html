@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenJDK on WebAssembly — live javac</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --edge:#26303d; --ink:#e6edf3; --dim:#8b949e;
+    --accent:#f2a33c; --accent2:#58a6ff; --spring:#6db33f; --out:#ade0b0; --err:#ff7b72; --sys:#6e7681;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--ink); font-family:var(--mono);
+    display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+  header { display:flex; align-items:center; gap:14px; padding:10px 18px;
+    border-bottom:1px solid var(--edge); background:linear-gradient(180deg,#161b22,#12161d); flex:0 0 auto; }
+  header .logo { font-size:20px; }
+  header h1 { font-size:14px; font-weight:600; margin:0; letter-spacing:.2px; }
+  header h1 b { color:var(--accent); }
+  header .tag { font-size:11px; color:var(--dim); border:1px solid var(--edge); padding:2px 8px; border-radius:20px; }
+  header .spacer { flex:1; }
+  label.sel { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; }
+  select { font-family:var(--mono); font-size:13px; background:#0b0f14; color:var(--ink);
+    border:1px solid var(--edge); border-radius:6px; padding:7px 10px; cursor:pointer; }
+  #run { font-family:var(--mono); font-size:13px; font-weight:600; cursor:pointer; color:#0d1117;
+    background:var(--accent); border:none; border-radius:6px; padding:8px 18px; transition:filter .15s, opacity .15s; }
+  #run:hover:not(:disabled) { filter:brightness(1.08); }
+  #run:disabled { opacity:.5; cursor:progress; }
+  main { flex:1; display:grid; grid-template-rows:1fr 42%; min-height:0; }
+  .editor-wrap, .console-wrap { display:flex; flex-direction:column; min-height:0; }
+  .bar { display:flex; align-items:center; gap:8px; padding:7px 16px; font-size:11px; color:var(--dim);
+    text-transform:uppercase; letter-spacing:.8px; border-bottom:1px solid var(--edge); background:var(--panel); }
+  .bar .dot { width:9px; height:9px; border-radius:50%; background:var(--sys); transition:background .2s; }
+  .bar .dot.live { background:var(--out); box-shadow:0 0 6px var(--out); animation:pulse 1.1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .bar .grow { flex:1; }
+  .bar .hint { text-transform:none; letter-spacing:0; color:var(--sys); }
+  textarea { flex:1; resize:none; border:none; outline:none; padding:16px 18px; background:#0b0f14; color:var(--ink);
+    font-family:var(--mono); font-size:13.5px; line-height:1.55; tab-size:4; }
+  #console { flex:1; overflow-y:auto; padding:12px 18px; background:#080b0f; font-size:13px; line-height:1.5;
+    white-space:pre-wrap; word-break:break-word; }
+  #console .out { color:var(--out); } #console .err { color:var(--err); } #console .sys { color:var(--sys); }
+  #console .banner { color:var(--accent2); } #console .ok { color:var(--accent); }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#26303d; border-radius:6px; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="logo">☕</span>
+    <h1><b>OpenJDK</b> HotSpot Zero &middot; WebAssembly &middot; live <b>javac</b></h1>
+    <span class="tag">28-internal &middot; wasm32 &middot; interpreter</span>
+    <span class="spacer"></span>
+    <label class="sel" for="template">Template</label>
+    <select id="template">
+      <option value="plain">Plain Java</option>
+      <option value="spring">Spring context</option>
+      <option value="http">HTTP fetch (needs relay)</option>
+    </select>
+    <button id="run">▶ Compile &amp; Run</button>
+  </header>
+  <main>
+    <div class="editor-wrap">
+      <div class="bar"><span class="dot"></span> Main.java <span class="grow"></span>
+        <span class="hint" id="ehint">compiled by javac inside the wasm JVM, then executed</span></div>
+      <textarea id="editor" spellcheck="false"></textarea>
+    </div>
+    <div class="console-wrap">
+      <div class="bar"><span class="dot" id="cdot"></span> Console output</div>
+      <div id="console"><span class="sys">Pick a template, edit the Java, and press <b>▶ Compile &amp; Run</b>.</span>
+</div>
+    </div>
+  </main>
+<script>
+  const TEMPLATES = {
+    plain: {
+      script: 'jvmweb.js', factory: 'createJVM',
+      hint: 'compiled by javac inside the wasm JVM, then executed',
+      code: `public class Main {
+    public static void main(String[] args) {
+        System.out.println("Compiled by javac and run on wasm — no JIT, pure interpreter.");
+        var primes = new StringBuilder();
+        for (int n = 2; n < 50; n++) {
+            boolean prime = true;
+            for (int d = 2; d * d <= n; d++)
+                if (n % d == 0) { prime = false; break; }
+            if (prime) primes.append(n).append(' ');
+        }
+        System.out.println("primes < 50: " + primes.toString().trim());
+        System.out.println("running on: " + System.getProperty("java.vm.name"));
+    }
+}`
+    },
+    spring: {
+      script: 'jvmspringweb.js', factory: 'createJVMSpring',
+      hint: 'javac + a real Spring container (spring-context 6.1) — jars fetched from Maven, baked into the image',
+      code: `import org.springframework.context.annotation.*;
+
+public class Main {
+    @Configuration(proxyBeanMethods = false)
+    static class AppConfig {
+        @Bean
+        Greeter greeter() { return new Greeter("WebAssembly"); }
+    }
+
+    static class Greeter {
+        private final String who;
+        Greeter(String who) { this.who = who; }
+        String greet() { return "Hello, " + who + "! — wired by the Spring container."; }
+    }
+
+    public static void main(String[] args) {
+        var ctx = new AnnotationConfigApplicationContext(AppConfig.class);
+        Greeter g = ctx.getBean(Greeter.class);
+        System.out.println(g.greet());
+        System.out.println("Spring managed " + ctx.getBeanDefinitionCount() + " bean definitions.");
+        ctx.close();
+    }
+}`
+    },
+    http: {
+      script: 'jvmnetweb.js', factory: 'createJVMNet', bridge: 'ws://localhost:8114/',
+      hint: 'real HTTP over a TCP relay — run "node tcp-relay.cjs 8114" locally first',
+      code: `import java.net.*;
+import java.io.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        String target = "http://example.com/";
+        System.out.println("GET " + target);
+        HttpURLConnection c = (HttpURLConnection) new URL(target).openConnection();
+        c.setRequestProperty("User-Agent", "wasm-jvm/0.1");
+        System.out.println("HTTP " + c.getResponseCode() + " " + c.getResponseMessage());
+        System.out.println("Server: " + c.getHeaderField("Server"));
+        try (var r = new BufferedReader(new InputStreamReader(c.getInputStream()))) {
+            String line; int n = 0;
+            while ((line = r.readLine()) != null && n++ < 8) System.out.println("| " + line);
+        } catch (IOException e) {
+            // benign: server closed the keep-alive connection after the body
+        }
+        System.out.println("[fetched over a real TCP socket, from wasm]");
+    }
+}`
+    }
+  };
+
+  const editor = document.getElementById('editor');
+  const consoleEl = document.getElementById('console');
+  const runBtn = document.getElementById('run');
+  const cdot = document.getElementById('cdot');
+  const tsel = document.getElementById('template');
+  const ehint = document.getElementById('ehint');
+  const loaded = {};   // script -> Promise
+
+  function setTemplate(key) { editor.value = TEMPLATES[key].code; ehint.textContent = TEMPLATES[key].hint; }
+  setTemplate('plain');
+  tsel.addEventListener('change', () => setTemplate(tsel.value));
+
+  function append(text, cls) {
+    const span = document.createElement('span');
+    span.className = cls || 'sys';
+    span.textContent = text + "\n";
+    consoleEl.appendChild(span);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+  function classify(line) {
+    if (line.startsWith('[compiled') || line.startsWith('[ran') || line.startsWith('[classpath')) return 'ok';
+    if (line.startsWith('[launcher]')) return 'sys';
+    if (/^(ERROR|error|--- |Exception|\tat )/.test(line)) return 'err';
+    if (line.startsWith('warning:')) return 'sys';
+    return 'out';
+  }
+  function loadScript(src) {
+    if (loaded[src]) return loaded[src];
+    loaded[src] = new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error('failed to load ' + src));
+      document.body.appendChild(s);
+    });
+    return loaded[src];
+  }
+
+  editor.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runBtn.click(); }
+  });
+
+  runBtn.addEventListener('click', async () => {
+    const tpl = TEMPLATES[tsel.value];
+    const source = editor.value;
+    runBtn.disabled = true;
+    consoleEl.innerHTML = '';
+    cdot.classList.add('live');
+    append(tsel.value === 'spring'
+      ? 'Booting the JVM, compiling with javac, starting the Spring container…'
+      : 'Booting HotSpot Zero VM and compiling with javac…', 'banner');
+    const t0 = performance.now();
+    let finished = false;
+    const finish = (code) => {
+      if (finished) return; finished = true;
+      const dt = ((performance.now() - t0) / 1000).toFixed(2);
+      append(`\n— VM exited (code ${code}) in ${dt}s —`, 'banner');
+      cdot.classList.remove('live'); runBtn.disabled = false;
+    };
+    try {
+      await loadScript(tpl.script);
+      const factory = window[tpl.factory];
+      await factory({
+        arguments: ['Runner'],
+        preRun: [ (M) => {
+          try { M.FS.mkdir('/work'); } catch (e) {}
+          M.FS.writeFile('/work/src.java', source);
+          if (tpl.bridge) M.FS.writeFile('/work/bridge', tpl.bridge);
+        } ],
+        print:    (s) => append(s, classify(s)),
+        printErr: (s) => append(s, s.startsWith('[launcher]') ? 'sys' : /warning:|Ignoring/.test(s) ? 'sys' : 'err'),
+        onExit:   (code) => finish(code),
+      });
+    } catch (e) {
+      if (e && e.name === 'ExitStatus') finish(e.status ?? 0);
+      else { append('Failed to start: ' + e, 'err'); cdot.classList.remove('live'); runBtn.disabled = false; }
+    }
+  });
+</script>
+</body>
+</html>

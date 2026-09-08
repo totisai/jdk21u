@@ -87,8 +87,14 @@ static verify_byte_codes_fn_t verify_byte_codes_fn() {
   // Load verify dll
   char buffer[JVM_MAXPATHLEN];
   char ebuf[1024];
+#ifdef STATIC_BUILD
+  // Monolithic (Emscripten) build: libverify is linked in; resolve via the
+  // static symbol table instead of locating an on-disk shared object.
+  os::snprintf_checked(buffer, sizeof(buffer), "verify");
+#else
   if (!os::dll_locate_lib(buffer, sizeof(buffer), Arguments::get_dll_dir(), "verify"))
     return nullptr; // Caller will throw VerifyError
+#endif
 
   void *lib_handle = os::dll_load(buffer, ebuf, sizeof(ebuf));
   if (lib_handle == nullptr)

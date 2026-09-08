@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WasmJVM · Desktop PoC — run a Swing jar in the browser</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#141925; --edge:#26304a; --ink:#e6edf3; --dim:#8b94a7; --acc:#4c8dff; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; overflow:hidden; }
+  /* the JVM screen fills the whole viewport */
+  #screen { position:fixed; inset:0; width:100vw; height:100vh; background:#1e1e22; display:block; z-index:1; }
+  /* launch overlay */
+  #overlay { position:fixed; inset:0; z-index:10; display:grid; place-items:center;
+    background:radial-gradient(1200px 600px at 50% -10%, #16203a, #0b0e14 60%); }
+  .card { width:min(560px,92vw); background:var(--panel); border:1px solid var(--edge);
+    border-radius:14px; padding:26px 28px; box-shadow:0 20px 60px rgba(0,0,0,.5); }
+  .card h1 { margin:0 0 6px; font-size:20px; letter-spacing:.2px; }
+  .card p { margin:0 0 18px; color:var(--dim); font-size:13px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  button { font:inherit; font-weight:600; color:#fff; background:var(--acc); border:0;
+    padding:11px 18px; border-radius:9px; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--ink); border:1px solid var(--edge); }
+  button:disabled { opacity:.5; cursor:default; }
+  .files { margin-top:14px; font-size:12px; color:var(--dim); max-height:110px; overflow:auto; }
+  .files b { color:var(--ink); }
+  /* floating console — a movable, resizable panel, not a docked strip */
+  #log { position:fixed; z-index:11; left:16px; bottom:16px; width:min(540px,88vw); height:min(300px,48vh);
+    overflow:auto; margin:0; padding:8px 12px; font:11px/1.45 ui-monospace,Menlo,monospace; color:#9fb0c9;
+    background:rgba(8,11,18,.92); border:1px solid var(--edge); border-radius:11px; white-space:pre-wrap;
+    display:none; backdrop-filter:blur(6px); box-shadow:0 14px 44px rgba(0,0,0,.5); resize:both; }
+  /* floating control dock — RTC/remote-desktop style: drag anywhere, snap left/center/right */
+  #bar { position:fixed; z-index:12; display:none; gap:6px; align-items:center;
+    padding:5px 8px 5px 5px; background:rgba(12,16,26,.82); border:1px solid var(--edge);
+    border-radius:13px; box-shadow:0 10px 30px rgba(0,0,0,.45); backdrop-filter:blur(9px);
+    user-select:none; touch-action:none; transition:box-shadow .15s; }
+  #bar.drag { box-shadow:0 16px 44px rgba(0,0,0,.6); }
+  #bar .grip { cursor:grab; color:var(--dim); font-size:15px; line-height:1; letter-spacing:-3px; padding:0 3px; }
+  #bar.drag .grip { cursor:grabbing; }
+  #bar button { padding:5px 10px; font-size:12px; font-weight:500; }
+  #bar .s { color:var(--dim); font-size:12px; white-space:nowrap; padding-right:2px; }
+  #bar .dot { width:7px; height:7px; border-radius:50%; background:#d29922; box-shadow:0 0 6px #d29922; flex:none; }
+  #bar .dot.run { background:#3fb950; box-shadow:0 0 6px #3fb950; }
+  #bar .dot.err { background:#f85149; box-shadow:0 0 6px #f85149; }
+  .hint { font-size:11px; color:var(--dim); margin-top:10px; }
+  /* file inspector */
+  #fs-panel { position:fixed; top:0; left:0; bottom:0; z-index:9; width:340px; max-width:80vw;
+    display:none; flex-direction:column; background:rgba(13,17,23,.95); border-right:1px solid var(--edge);
+    backdrop-filter:blur(6px); box-shadow:4px 0 24px rgba(0,0,0,.4); }
+  #fs-panel.open { display:flex; }
+  .fs-head { display:flex; align-items:center; gap:6px; padding:8px 10px; border-bottom:1px solid var(--edge);
+    font-size:13px; color:var(--ink); }
+  .fs-head .ghost { padding:3px 8px; font-size:13px; }
+  #fs-tree { flex:1; overflow:auto; padding:6px 4px 12px; font:12px/1.5 ui-monospace,Menlo,monospace; }
+  .fsnode { white-space:nowrap; }
+  .fsrow { display:flex; align-items:center; gap:4px; padding:1px 6px; border-radius:5px; cursor:pointer; color:#cdd6e4; }
+  .fsrow:hover { background:rgba(76,141,255,.14); }
+  .fsrow .tw { width:12px; text-align:center; color:var(--dim); }
+  .fsrow .ic { width:16px; text-align:center; }
+  .fsrow .nm { overflow:hidden; text-overflow:ellipsis; }
+  .fsrow .sz { margin-left:auto; padding-left:8px; color:var(--dim); font-size:11px; }
+  .fschildren { margin-left:12px; border-left:1px solid #1e2836; }
+  #fs-preview { border-top:1px solid var(--edge); max-height:45%; display:flex; flex-direction:column; }
+  .fs-preview-head { display:flex; align-items:center; gap:6px; padding:6px 10px; font:12px ui-monospace,monospace; color:var(--acc); }
+  .fs-preview-head span { flex:1; overflow:hidden; text-overflow:ellipsis; }
+  #fs-preview-body { margin:0; padding:8px 10px; overflow:auto; font:11px/1.45 ui-monospace,monospace;
+    color:#b9c4d6; white-space:pre-wrap; word-break:break-all; }
+  /* file viewer modal */
+  #fs-modal { position:fixed; inset:0; z-index:20; display:grid; place-items:center;
+    background:rgba(2,4,8,.62); backdrop-filter:blur(2px); }
+  #fs-modal[hidden] { display:none; }
+  .fsm-card { width:min(1100px,92vw); height:min(80vh,900px); display:flex; flex-direction:column;
+    background:#0e131c; border:1px solid var(--edge); border-radius:12px; box-shadow:0 24px 80px rgba(0,0,0,.6); overflow:hidden; }
+  .fsm-head { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--edge);
+    background:#131926; }
+  .fsm-name { font:13px ui-monospace,Menlo,monospace; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:60%; }
+  .fsm-meta { font-size:12px; color:var(--dim); }
+  .fsm-head .ghost { padding:5px 11px; font-size:12px; }
+  .fsm-body { flex:1; margin:0; padding:14px 16px; overflow:auto; font:12.5px/1.6 ui-monospace,Menlo,monospace;
+    color:#d7e0ee; background:#0b0f16; white-space:pre; tab-size:4; }
+  .fsm-body.wrap { white-space:pre-wrap; word-break:break-word; }
+</style>
+</head>
+<body>
+  <canvas id="screen" width="1024" height="768"></canvas>
+
+  <div id="overlay">
+    <div class="card">
+      <h1>Run a Swing app in the browser</h1>
+      <p>A real OpenJDK-21 JVM (HotSpot Zero → WebAssembly) with AWT/Swing rendered
+         to a full-viewport canvas. Pick one or more application <code>.jar</code>s —
+         its <code>Main-Class</code> runs and fills the window; keyboard &amp; mouse work.</p>
+      <div class="row">
+        <button id="pick">▶ Select JAR(s)</button>
+        <button id="pickdir">📁 Select folder</button>
+        <button id="demo" class="ghost">Run bundled demo</button>
+      </div>
+      <div class="row" style="margin-top:12px; align-items:center;">
+        <input id="main" type="text" placeholder="Main class (optional — auto-detected from a jar manifest)"
+          style="flex:1; min-width:220px; padding:9px 11px; border-radius:8px; border:1px solid var(--edge);
+                 background:#0e1420; color:var(--ink); font:inherit;">
+      </div>
+      <div class="row" style="margin-top:8px; align-items:center;">
+        <input id="args" type="text" placeholder="Program arguments (optional — space-separated)"
+          style="flex:1; min-width:220px; padding:9px 11px; border-radius:8px; border:1px solid var(--edge);
+                 background:#0e1420; color:var(--ink); font:inherit;">
+      </div>
+      <textarea id="props" rows="3" placeholder="System properties (optional — one key=value per line, e.g. idea.home.path=/app/user/idea)"
+        style="width:100%; margin-top:8px; padding:9px 11px; border-radius:8px; border:1px solid var(--edge);
+               background:#0e1420; color:var(--ink); font:12px/1.5 ui-monospace,monospace; resize:vertical; box-sizing:border-box;"></textarea>
+      <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--ink); cursor:pointer;">
+        <input id="jit" type="checkbox" checked>
+        Enable bytecode→wasm JIT (<code>WASMJIT_ALL</code>) —
+        <span style="color:var(--dim);">runs on the owner thread; interpreter fallback elsewhere</span>
+      </label>
+      <input id="file" type="file" accept=".jar" multiple hidden>
+      <input id="dir" type="file" webkitdirectory directory multiple hidden>
+      <div class="files" id="picked"></div>
+      <div class="hint">Pick individual <b>.jar</b>s, or a whole app <b>folder</b> (its <code>lib/*.jar</code> +
+        resources + classes go on the classpath, structure preserved). If no jar declares a
+        <code>Main-Class</code>, type it above. The whole window becomes the app; reload to run another.</div>
+    </div>
+  </div>
+
+  <div id="bar">
+    <span class="grip" id="grip" title="Drag to move · double-click to cycle left / center / right">⠿</span>
+    <span class="dot" id="dot"></span>
+    <span class="s" id="stat">booting…</span>
+    <button id="togfs" class="ghost">files</button>
+    <button id="toglog" class="ghost">log</button>
+    <button id="snap" class="ghost" title="Snap: left / center / right">⇄</button>
+  </div>
+  <pre id="log"></pre>
+
+  <!-- JVM filesystem (MEMFS) inspector -->
+  <aside id="fs-panel">
+    <div class="fs-head">
+      <b>JVM workspace</b>
+      <span style="flex:1"></span>
+      <button id="fsRefresh" class="ghost" title="Rescan">⟳</button>
+      <button id="fsClose" class="ghost" title="Close">✕</button>
+    </div>
+    <div id="fs-tree"></div>
+    <div id="fs-preview" hidden>
+      <div class="fs-preview-head"><span id="fs-preview-name"></span><button id="fsPvClose" class="ghost">✕</button></div>
+      <pre id="fs-preview-body"></pre>
+    </div>
+  </aside>
+
+  <!-- file viewer modal -->
+  <div id="fs-modal" hidden>
+    <div class="fsm-card">
+      <div class="fsm-head">
+        <span id="fsm-name" class="fsm-name"></span>
+        <span id="fsm-meta" class="fsm-meta"></span>
+        <span style="flex:1"></span>
+        <button id="fsmWrap" class="ghost" title="Toggle wrap">wrap</button>
+        <button id="fsmCopy" class="ghost" title="Copy">copy</button>
+        <button id="fsmClose" class="ghost" title="Close (Esc)">✕</button>
+      </div>
+      <pre id="fsm-body" class="fsm-body"></pre>
+    </div>
+  </div>
+
+<script type="module">
+import { WasmJVM, Net } from './wasmjvm.js';
+
+const $ = s => document.querySelector(s);
+const logEl = $('#log'), overlay = $('#overlay'), bar = $('#bar'), stat = $('#stat'), dot = $('#dot');
+let logText = '';
+// Drop high-volume, low-value lines (JIT compile notices, unsupported-syscall
+// warnings) and cap the buffer, so a boot-time flood can't turn the O(n) textContent
+// rebuild into an O(n^2) UI freeze.
+const log = s => {
+  if (/^\[wasmjit\] compiled |^warning: unsupported syscall/.test(s)) return;
+  logText += s + '\n';
+  if (logText.length > 60000) logText = logText.slice(-50000);
+  logEl.textContent = logText; logEl.scrollTop = 1e9;
+};
+$('#toglog').onclick = () => { logEl.style.display = logEl.style.display === 'block' ? 'none' : 'block'; };
+// status dot: 'load' (amber) -> 'run' (green) / 'err' (red)
+const setStatus = (text, cls) => { if (text != null) stat.textContent = text; if (cls != null) dot.className = 'dot ' + cls; };
+
+// ---- floating control dock: drag anywhere, snap to left / center / right ----
+(function initDock(){
+  const grip = $('#grip'), EDGE = 14;
+  const anchors = ['tc','cl','cr'];   // top-center, center-left, center-right
+  let ai = 0;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  function moveTo(x, y){
+    const w = bar.offsetWidth, h = bar.offsetHeight;
+    bar.style.right = 'auto'; bar.style.bottom = 'auto';
+    bar.style.left = clamp(x, 6, innerWidth  - w - 6) + 'px';
+    bar.style.top  = clamp(y, 6, innerHeight - h - 6) + 'px';
+  }
+  function place(a){
+    const w = bar.offsetWidth, h = bar.offsetHeight, W = innerWidth, H = innerHeight;
+    if (a === 'cl') moveTo(EDGE, (H - h) / 2);
+    else if (a === 'cr') moveTo(W - w - EDGE, (H - h) / 2);
+    else moveTo((W - w) / 2, EDGE);            // tc
+  }
+  const cycle = () => { ai = (ai + 1) % anchors.length; place(anchors[ai]); };
+  $('#snap').onclick = cycle;
+  grip.ondblclick = cycle;
+  let dx = 0, dy = 0, dragging = false;
+  grip.addEventListener('pointerdown', e => {
+    dragging = true; bar.classList.add('drag');
+    dx = e.clientX - bar.offsetLeft; dy = e.clientY - bar.offsetTop;
+    grip.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  grip.addEventListener('pointermove', e => { if (dragging) moveTo(e.clientX - dx, e.clientY - dy); });
+  const end = e => { dragging = false; bar.classList.remove('drag'); try { grip.releasePointerCapture(e.pointerId); } catch(_){} };
+  grip.addEventListener('pointerup', end);
+  grip.addEventListener('pointercancel', end);
+  addEventListener('resize', () => { if (bar.style.display !== 'none') place(anchors[ai]); });
+  bar._place = () => place(anchors[ai]);       // called once the dock is shown
+})();
+
+// viewport size in CSS pixels — the JVM screen + canvas render buffer match it 1:1
+function viewport() { return [Math.max(320, window.innerWidth|0), Math.max(240, window.innerHeight|0)]; }
+
+/* Core launch. `jars`: [{path,bytes}|{path,url}] added to classpath. `files`:
+ * [{path,bytes}] staged verbatim (a folder tree). `cp`: explicit classpath list.
+ * `mainClass`: optional override written to /work/mainclass. */
+async function launch({ jars = [], files = [], cp = null, mainClass = null, props = null, args = null }) {
+  overlay.style.display = 'none';
+  bar.style.display = 'flex';
+  bar._place();                 // anchor the floating dock (default: top-center)
+  logEl.style.display = 'block';
+  setStatus('booting…', 'load');
+  const [vw, vh] = viewport();
+  const cv = $('#screen'); cv.width = vw; cv.height = vh;
+
+  jars = [{ path: '/app/lib/launcher.jar', url: './launcher.jar' }, ...jars];  // generic launcher
+  const enc = s => new TextEncoder().encode(s);
+  if (mainClass) files = [...files, { path: '/work/mainclass', bytes: enc(mainClass) }];
+  // JarApp reads /work/props ("key=value" per line, applied as system properties before
+  // the app loads) and /work/args (one arg per line -> String[] main args).
+  if (props && props.trim()) files = [...files, { path: '/work/props', bytes: enc(props) }];
+  if (args && args.trim())   files = [...files, { path: '/work/args',  bytes: enc(args.trim().split(/\s+/).join('\n')) }];
+
+  // Full app classpath (may be large for an exploded folder). JarApp reads this
+  // file itself; the launcher's own classpath is kept SHORT (it caps at ~900 B),
+  // just enough to load JarApp — which then builds a loader over the full set.
+  const fullCp = cp || ['/app', ...jars.map(j => j.path)];
+  files = [...files, { path: '/work/fullcp', bytes: enc(fullCp.join(':')) }];
+  const classpath = ['/app/lib/launcher.jar', '/app', '/app/user'];   // bootstrap only
+
+  const jitOn = $('#jit') ? $('#jit').checked : true;
+
+  // Modular JDK: load the default "runtime profile" (full JDK minus dev/build
+  // tools: compiler, javadoc, jshell, jfr, jlink…). CheerpJ-style lazy-FS
+  // (placeholder tree + fetch-on-read, runtime.lazyFS) is now the DEFAULT and
+  // works in the browser: only a minimal boot set is fully downloaded; every other
+  // module is a correctly-sized placeholder whose class bytes are fetched on first
+  // touch via synchronous XHR. (The earlier "module scan too slow" was a red
+  // herring — it was the PACKS-collision + JIT global-lock boot stalls, both fixed.)
+  const full = false;
+  let packList;
+  try { const m = await (await fetch('../packs/manifest.json')).json(); packList = full ? m.packs : (m.runtime || m.packs); }
+  catch (e) { log('[poc] pack manifest fetch failed (' + e + '); using extras only'); packList = ['extras']; }
+
+  // Lazy-FS default ON (?lazy=0 to force eager staging of every pack). Fully stage
+  // only the Swing boot set; register the rest as CheerpJ-style fetch-on-read
+  // placeholders. ?boot=min shrinks the boot set to prove on-demand fetch.
+  const qs = new URLSearchParams(location.search);
+  const lazyOn = qs.get('lazy') !== '0';
+  const bootMin = qs.get('boot') === 'min';
+  const BOOT_PACKS = (bootMin ? ['extras', 'mod-java.base', 'mod-java.desktop']
+                     : ['extras', 'mod-java.base', 'mod-java.desktop', 'mod-java.datatransfer',
+                        'mod-java.xml', 'mod-java.prefs', 'mod-java.logging'])
+                      .filter((n) => packList.includes(n));
+  const runtimeCfg = { basePath: '../', packsPath: '../packs/', packs: packList };
+  if (lazyOn) { runtimeCfg.lazyFS = true; runtimeCfg.bootPacks = BOOT_PACKS;
+                log('[poc] lazy-FS ON — boot set: ' + BOOT_PACKS.join(', ')); }
+
+  // Networking (OPTIONAL, opt-in): ?net=1 wires the WebSocket->TCP relay so the JVM's
+  // real sockets reach the internet (real DNS + any host). Start the relay first:
+  //     node wasm-jvm/tcp-relay.cjs 8114
+  // Off by default: no bridge is written, the default (non-net) artifact loads and
+  // boots clean, and the app's Fetch button degrades to "network unavailable".
+  const network = Net.fromParam(qs.get('net'));   // ?net=1 (default relay) | ?net=ws://host:port/ | off
+  const relayUrl = Net.resolve(network);
+  const fetchUrl = qs.get('url') || 'http://example.com/';
+  if (relayUrl) log('[poc] networking ON via relay ' + relayUrl + ' — demo fetches ' + fetchUrl);
+
+  const vmOpts = ['-Dpoc.viewportW=' + vw, '-Dpoc.viewportH=' + vh,
+                '-Djava.awt.headless=false', '-Dsun.java2d.wasm.screenWidth=' + vw,
+                '-Dsun.java2d.wasm.screenHeight=' + vh,
+                // in-memory java.util.prefs backend (FileSystemPreferences hangs on
+                // unsupported syscalls); class lives in launcher.jar (bootstrap cp).
+                '-Djava.util.prefs.PreferencesFactory=MemoryPreferencesFactory',
+                '-Ddemo.fetchUrl=' + fetchUrl];
+  if (qs.get('auto') === '1') vmOpts.push('-Ddemo.autoFetch=1');
+
+  // Debug affordance: `wasmjit.deny=<substr>` in the properties box forces any method
+  // whose holder.name contains <substr> to stay interpreted (bisect a JIT miscompile).
+  const _env = {};
+  { const _dm = props && props.match(/wasmjit\.deny\s*=\s*(\S+)/); if (_dm) _env.WASMJIT_DENY = _dm[1]; }
+  const jvm = new WasmJVM({
+    runtime: runtimeCfg,
+    env: _env,                                       // diagnostic env vars (WASMJIT_DENY)
+    jit: jitOn,                                      // first-class: bytecode->wasm JIT
+    network,                                         // undefined unless ?net=… given
+    app: { mainClass: 'JarApp', jars, files, classpath },
+    // Canvas2D command pipeline (poc.canvas2d=true) needs a 2D context, not WebGL --
+    // a canvas can't hold both. Force '2d' present when the user enabled it.
+    render: { canvas: '#screen', width: vw, height: vh, viewport: 'fill', fit: 'fill',
+              mode: 'awt', present: (props && /poc\.canvas2d\s*=\s*true/.test(props)) ? '2d' : 'webgl',
+              input: true, mousemove: false },
+    addModules: ['ALL-SYSTEM'],
+    vmOptions: vmOpts,
+    onStdout: log, onStderr: log,
+    onReady: () => { setStatus('running', 'run'); },
+  });
+  window._jvm = jvm;
+  setStatus('loading runtime + JDK (~69 MB first time)…', 'load');
+  try { await jvm.start(); }
+  catch (e) { log('[poc] start failed: ' + e); setStatus('error', 'err'); }
+  $('#screen').focus();
+}
+
+const mainOf  = () => ($('#main').value || '').trim() || null;
+const propsOf = () => ($('#props').value || '').trim() || null;
+const argsOf  = () => ($('#args').value  || '').trim() || null;
+const opts    = () => ({ mainClass: mainOf(), props: propsOf(), args: argsOf() });
+
+// individual jars -> /app/lib/<name>, all on the classpath
+$('#pick').onclick = () => $('#file').click();
+$('#file').onchange = async (e) => {
+  const sel = [...e.target.files].filter(f => f.name.endsWith('.jar'));
+  if (!sel.length) return;
+  $('#picked').innerHTML = 'Loading: ' + sel.map(f => '<b>' + f.name + '</b>').join(', ');
+  const jars = [];
+  for (const f of sel) jars.push({ path: '/app/lib/' + f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
+  launch({ jars, ...opts() });
+};
+
+// a whole folder -> /app/user/<relpath>, structure preserved; jars + dirs on classpath
+$('#pickdir').onclick = () => $('#dir').click();
+$('#dir').onchange = async (e) => {
+  const sel = [...e.target.files];
+  if (!sel.length) return;
+  $('#picked').innerHTML = 'Staging <b>' + sel.length + '</b> files from folder…';
+  const files = [], jarPaths = [], dirSet = new Set(['/app', '/app/user']);
+  let total = 0;
+  for (const f of sel) {
+    const rel = f.webkitRelativePath || f.name;         // e.g. "myapp/lib/x.jar"
+    const path = '/app/user/' + rel;
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    total += bytes.length;
+    files.push({ path, bytes });
+    if (path.endsWith('.jar')) jarPaths.push(path);
+    const dir = path.slice(0, path.lastIndexOf('/'));
+    dirSet.add(dir);
+    // also add the top-level folder root so loose classes resolve
+    dirSet.add('/app/user/' + rel.split('/')[0]);
+  }
+  log('[poc] staged ' + sel.length + ' files (' + (total/1048576).toFixed(1) + ' MB), ' + jarPaths.length + ' jar(s)');
+  const cp = ['/app', '/app/user', ...dirSet, ...jarPaths, '/app/lib/launcher.jar'];
+  launch({ files, cp, ...opts() });
+};
+
+$('#demo').onclick = async () => {
+  const bytes = new Uint8Array(await (await fetch('./demo-swing.jar')).arrayBuffer());
+  launch({ jars: [{ path: '/app/lib/demo-swing.jar', bytes }], ...opts() });
+};
+
+// ---- JVM filesystem (MEMFS) inspector ----
+const FS = () => (window._jvm && window._jvm.module && window._jvm.module.FS) || null;
+const hsize = n => n < 1024 ? n + 'B' : n < 1048576 ? (n/1024).toFixed(0) + 'K' : (n/1048576).toFixed(1) + 'M';
+const icon = (name, dir) => dir ? '📁'
+  : /\.jar$/i.test(name) ? '📦' : /\.class$/i.test(name) ? '🟠'
+  : /\.(png|gif|jpg|jpeg|bmp|ico)$/i.test(name) ? '🖼️'
+  : /\.(java|txt|properties|xml|theme|cfg|json|md|html?|js|css|policy|mf|list|dat|conf)$/i.test(name) ? '📄' : '▫️';
+
+function renderDir(path, container) {
+  const fs = FS(); if (!fs) return;
+  let names; try { names = fs.readdir(path).filter(n => n !== '.' && n !== '..'); } catch (e) { return; }
+  const entries = names.map(n => {
+    const p = path === '/' ? '/' + n : path + '/' + n;
+    let st; try { st = fs.stat(p); } catch (e) { return null; }
+    return { n, p, dir: fs.isDir(st.mode), size: st.size };
+  }).filter(Boolean).sort((a, b) => a.dir !== b.dir ? (a.dir ? -1 : 1) : a.n.localeCompare(b.n));
+  container.innerHTML = '';
+  for (const e of entries) {
+    const node = document.createElement('div'); node.className = 'fsnode';
+    const row = document.createElement('div'); row.className = 'fsrow';
+    const tw = document.createElement('span'); tw.className = 'tw'; tw.textContent = e.dir ? '▸' : '';
+    const ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = icon(e.n, e.dir);
+    const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = e.n;
+    row.append(tw, ic, nm);
+    if (!e.dir) { const sz = document.createElement('span'); sz.className = 'sz'; sz.textContent = hsize(e.size); row.append(sz); }
+    node.append(row);
+    if (e.dir) {
+      const kids = document.createElement('div'); kids.className = 'fschildren'; kids.style.display = 'none';
+      node.append(kids); let loaded = false;
+      row.onclick = () => { const open = kids.style.display === 'none'; kids.style.display = open ? 'block' : 'none';
+        tw.textContent = open ? '▾' : '▸'; if (open && !loaded) { loaded = true; renderDir(e.p, kids); } };
+    } else {
+      row.onclick = () => openFileModal(e.p, e.size);
+    }
+    container.append(node);
+  }
+}
+function hexDump(d) { let s = ''; for (let i = 0; i < d.length; i += 16) { let h = '', a = '';
+  for (let j = 0; j < 16 && i + j < d.length; j++) { const b = d[i+j]; h += b.toString(16).padStart(2,'0') + ' '; a += (b>=32&&b<127)?String.fromCharCode(b):'.'; }
+  s += h.padEnd(48) + ' ' + a + '\n'; } return s; }
+function previewFile(path, size) {
+  const fs = FS(); if (!fs) return;
+  $('#fs-preview').hidden = false; $('#fs-preview-name').textContent = path + '  (' + hsize(size) + ')';
+  const body = $('#fs-preview-body');
+  if (size > 512 * 1024) { body.textContent = '(large file — ' + hsize(size) + ', not shown)'; return; }
+  try {
+    const d = fs.readFile(path);
+    if (d.length === 0) { body.textContent = '(empty)'; return; }
+    let printable = 0, n = Math.min(d.length, 4096);
+    for (let i = 0; i < n; i++) { const b = d[i]; if (b===9||b===10||b===13||(b>=32&&b<127)) printable++; }
+    if (printable / n > 0.85) body.textContent = new TextDecoder().decode(d.subarray(0, Math.min(d.length, 65536))) + (d.length > 65536 ? '\n… (truncated)' : '');
+    else body.textContent = '(binary — ' + hsize(size) + ')\n' + hexDump(d.subarray(0, 256));
+  } catch (e) { body.textContent = '(error reading: ' + e + ')'; }
+}
+function refreshTree() { const t = $('#fs-tree');
+  if (!FS()) { t.innerHTML = '<div style="color:var(--dim);padding:8px">JVM not running yet — launch an app first.</div>'; return; }
+  renderDir('/', t); }
+$('#togfs').onclick = () => { const p = $('#fs-panel'); p.classList.toggle('open'); if (p.classList.contains('open')) refreshTree(); };
+$('#fsClose').onclick = () => $('#fs-panel').classList.remove('open');
+$('#fsRefresh').onclick = refreshTree;
+$('#fsPvClose').onclick = () => { $('#fs-preview').hidden = true; };
+
+// ---- file viewer modal (read text/binary in a big scrollable view) ----
+let fsmText = '';
+function openFileModal(path, size) {
+  const fs = FS(); if (!fs) return;
+  $('#fsm-name').textContent = path;
+  $('#fsm-meta').textContent = hsize(size);
+  const body = $('#fsm-body'); fsmText = '';
+  const LIMIT = 4 * 1024 * 1024;   // 4 MB text cap
+  try {
+    if (size > LIMIT + 512 * 1024) { body.textContent = '(file is ' + hsize(size) + ' — too large to display)'; }
+    else {
+      const d = fs.readFile(path);
+      if (d.length === 0) { body.textContent = '(empty file)'; }
+      else {
+        let printable = 0, n = Math.min(d.length, 8192);
+        for (let i = 0; i < n; i++) { const b = d[i]; if (b===9||b===10||b===13||(b>=32&&b<127)) printable++; }
+        if (printable / n > 0.85) {
+          fsmText = new TextDecoder('utf-8', { fatal: false }).decode(d.subarray(0, Math.min(d.length, LIMIT)))
+                    + (d.length > LIMIT ? '\n\n… (truncated at ' + hsize(LIMIT) + ')' : '');
+          body.textContent = fsmText;
+        } else {
+          fsmText = hexDump(d.subarray(0, 8192)) + (d.length > 8192 ? '\n… (' + hsize(size) + ' total)' : '');
+          body.textContent = '(binary — ' + hsize(size) + ')\n\n' + fsmText;
+        }
+      }
+    }
+  } catch (e) { body.textContent = '(error reading: ' + e + ')'; }
+  body.scrollTop = 0;
+  $('#fs-modal').hidden = false;
+}
+const closeModal = () => { $('#fs-modal').hidden = true; };
+$('#fsmClose').onclick = closeModal;
+$('#fs-modal').addEventListener('click', (e) => { if (e.target === $('#fs-modal')) closeModal(); });
+$('#fsmWrap').onclick = () => $('#fsm-body').classList.toggle('wrap');
+$('#fsmCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('#fsm-body').textContent); $('#fsmCopy').textContent = 'copied'; setTimeout(() => $('#fsmCopy').textContent = 'copy', 1200); } catch (e) {}
+};
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#fs-modal').hidden) { e.stopPropagation(); closeModal(); } }, true);
+</script>
+</body>
+</html>

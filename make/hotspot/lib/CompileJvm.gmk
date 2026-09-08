@@ -33,16 +33,41 @@ include lib/JvmFlags.gmk
 # Setup compilation of the main Hotspot native library (libjvm).
 
 JVM_OUTPUTDIR := $(JVM_VARIANT_OUTPUTDIR)/libjvm
-JVM_MAPFILE := $(JVM_OUTPUTDIR)/mapfile
+ifeq ($(call isTargetOs, emscripten), true)
+  # wasm-ld has no version-script/mapfile concept; skip it entirely.
+  JVM_MAPFILE :=
+  JVM_USE_MAPFILE := false
+else
+  JVM_MAPFILE := $(JVM_OUTPUTDIR)/mapfile
+  JVM_USE_MAPFILE := true
+endif
 
 ################################################################################
 # Platform independent setup
 
-JVM_LDFLAGS += \
-    $(SHARED_LIBRARY_FLAGS) \
-    $(JVM_LDFLAGS_FEATURES) \
-    $(EXTRA_LDFLAGS) \
-    #
+ifeq ($(OPENJDK_TARGET_OS), emscripten)
+  # On Emscripten the whole JVM (libjvm + libjava/libjimage/libzip/...) is linked
+  # into a single monolithic MAIN_MODULE, so the VM must behave as a statically
+  # linked VM: os::dll_load returns the process handle and JNI/JIMAGE entry points
+  # are resolved from the generated static symbol table instead of via dlopen.
+  JVM_CFLAGS += -DSTATIC_BUILD
+  # On Emscripten, libjvm is statically linked into the launcher's MAIN_MODULE,
+  # so build it as a plain relocatable object (-shared) rather than a loadable
+  # SIDE_MODULE (which SHARED_LIBRARY_FLAGS would select). The JDK libraries that
+  # the VM dlopens at run time (libjava, libjimage, ...) remain side modules.
+  JVM_LDFLAGS += \
+      -shared \
+      -pthread \
+      $(JVM_LDFLAGS_FEATURES) \
+      $(EXTRA_LDFLAGS) \
+      #
+else
+  JVM_LDFLAGS += \
+      $(SHARED_LIBRARY_FLAGS) \
+      $(JVM_LDFLAGS_FEATURES) \
+      $(EXTRA_LDFLAGS) \
+      #
+endif
 
 JVM_ASFLAGS += $(EXTRA_ASFLAGS)
 
@@ -189,7 +214,7 @@ $(eval $(call SetupJdkLibrary, BUILD_LIBJVM, \
     OPTIMIZATION := $(JVM_OPTIMIZATION), \
     OBJECT_DIR := $(JVM_OUTPUTDIR)/objs, \
     MAPFILE := $(JVM_MAPFILE), \
-    USE_MAPFILE_FOR_SYMBOLS := true, \
+    USE_MAPFILE_FOR_SYMBOLS := $(JVM_USE_MAPFILE), \
     STRIPFLAGS := $(JVM_STRIPFLAGS), \
     EMBED_MANIFEST := true, \
     RC_FILEDESC := $(HOTSPOT_VM_DISTRO) $(OPENJDK_TARGET_CPU_BITS)-Bit $(JVM_VARIANT) VM, \
@@ -232,7 +257,9 @@ endif
 # Include mapfile generation. It relies on BUILD_LIBJVM_ALL_OBJS which is only
 # defined after the above call to BUILD_LIBJVM. Mapfile will be generated
 # after all object files are built, but before the jvm library is linked.
-include lib/JvmMapfile.gmk
+ifneq ($(call isTargetOs, emscripten), true)
+  include lib/JvmMapfile.gmk
+endif
 
 TARGETS += $(BUILD_LIBJVM)
 

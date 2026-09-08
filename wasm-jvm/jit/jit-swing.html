@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8"><title>Swing in JIT mode</title>
+<style>body{margin:12px;font:13px system-ui}#c{border:1px solid #555}</style>
+<h3>Swing/AWT app rendering with WasmJit enabled (WASMJIT_ALL=1)</h3>
+<canvas id="c" width="440" height="320"></canvas>
+<pre id="log" style="color:#888;max-height:80px;overflow:auto"></pre>
+<script src="/jvm-awt.js"></script>
+<script>
+const log=document.getElementById('log'), cv=document.getElementById('c'), ctx=cv.getContext('2d');
+let mod=null, jit=0;
+createJVM({
+  arguments:['Ball'],
+  preRun:[M=>{ mod=M; try{M.FS.mkdir('/work')}catch(e){} M.ENV['WASMJIT_ALL']='1'; }],
+  print:s=>{ if(/wasmjit\] compiled/.test(s)){jit++; if(jit<=6) log.textContent+=s+'\n';} },
+  printErr:s=>{},
+});
+let last=-1;
+function draw(){ if(mod){ try{ const seq=mod.FS.readFile('/work/seq',{encoding:'utf8'});
+  if(seq!==last){ last=seq; const d=mod.FS.readFile('/work/frame.bin'); const px=d.length/4;
+    let w=440,h=320; if(w*h!==px){for(const[a,b]of[[854,480],[440,320],[480,360]])if(a*b===px){w=a;h=b;break;}}
+    if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(d.buffer,d.byteOffset,w*h*4),w,h),0,0);
+    window.__jit=jit; window.__frames=(window.__frames||0)+1; } }catch(e){} }
+  requestAnimationFrame(draw); }
+requestAnimationFrame(draw);
+</script>

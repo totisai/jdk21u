@@ -66,7 +66,7 @@ class ConcurrentHashTable : public CHeapObj<F> {
   class Node {
    private:
     Node * volatile _next;
-    VALUE _value;
+    NOT_LP64(alignas(8)) VALUE _value;
    public:
     Node(const VALUE& value, Node* next = nullptr)
       : _next(next), _value(value) {

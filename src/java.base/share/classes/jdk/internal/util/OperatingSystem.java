@@ -131,6 +131,13 @@ public enum OperatingSystem {
      * Names not recognized throw ExceptionInInitializerError with IllegalArgumentException.
      */
     private static OperatingSystem initOS() {
-        return OperatingSystem.valueOf(PlatformProps.CURRENT_OS_STRING.toUpperCase(Locale.ROOT));
+        String os = PlatformProps.CURRENT_OS_STRING.toUpperCase(Locale.ROOT);
+        // The Wasm/Emscripten target has no dedicated enum constant. The
+        // monolithic build ships the (macOS host) boot java.desktop classes and
+        // font paths, so report MACOS to keep platform-dependent code consistent.
+        if (os.equals("EMSCRIPTEN")) {
+            return MACOS;
+        }
+        return OperatingSystem.valueOf(os);
     }
 }

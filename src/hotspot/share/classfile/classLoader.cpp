@@ -945,9 +945,16 @@ void ClassLoader::load_zip_library() {
   assert(ZipOpen == nullptr, "should not load zip library twice");
   char path[JVM_MAXPATHLEN];
   char ebuf[1024];
+#ifdef STATIC_BUILD
+  // Monolithic (Emscripten) build: libzip is linked in; resolve via the static
+  // symbol table instead of locating an on-disk shared object.
+  os::snprintf_checked(path, sizeof(path), "zip");
+  _zip_handle = os::dll_load(path, ebuf, sizeof ebuf);
+#else
   if (os::dll_locate_lib(path, sizeof(path), Arguments::get_dll_dir(), "zip")) {
     _zip_handle = os::dll_load(path, ebuf, sizeof ebuf);
   }
+#endif
   if (_zip_handle == nullptr) {
     vm_exit_during_initialization("Unable to load zip library", path);
   }
@@ -964,9 +971,16 @@ void ClassLoader::load_jimage_library() {
   char path[JVM_MAXPATHLEN];
   char ebuf[1024];
   void* handle = nullptr;
+#ifdef STATIC_BUILD
+  // Monolithic (Emscripten) build: libjimage is linked in; resolve via the
+  // static symbol table instead of locating an on-disk shared object.
+  os::snprintf_checked(path, sizeof(path), "jimage");
+  handle = os::dll_load(path, ebuf, sizeof ebuf);
+#else
   if (os::dll_locate_lib(path, sizeof(path), Arguments::get_dll_dir(), "jimage")) {
     handle = os::dll_load(path, ebuf, sizeof ebuf);
   }
+#endif
   if (handle == nullptr) {
     vm_exit_during_initialization("Unable to load jimage library", path);
   }

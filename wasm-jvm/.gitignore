@@ -1,0 +1,6 @@
+# Build outputs and local dependencies — never commit these.
+node_modules/
+out/
+*.class
+*.o
+*.dump

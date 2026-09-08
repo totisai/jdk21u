@@ -30,7 +30,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#ifdef _ALLBSD_SOURCE
+// Emscripten sets _ALLBSD_SOURCE (musl/BSD-like) but has no macOS clonefile/
+// getattrlist headers, so exclude these Darwin-only includes there.
+#if defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
 #include <sys/attr.h>
 #include <sys/clonefile.h>
 #endif
@@ -122,7 +124,7 @@ class UnixConstants {
 #endif
 
 // fgetxattr error codes for absent attributes depend on the OS:
-#ifdef _ALLBSD_SOURCE
+#if defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
     static final int PREFIX_XATTR_NOT_FOUND = ENOATTR;
 #elif __linux__
     static final int PREFIX_XATTR_NOT_FOUND = ENODATA;
@@ -148,7 +150,8 @@ class UnixConstants {
     static final int PREFIX_AT_REMOVEDIR = 00;
 #endif
 
-#ifdef _ALLBSD_SOURCE
+// Emscripten is _ALLBSD_SOURCE but has no macOS clonefile/getattrlist support.
+#if defined(_ALLBSD_SOURCE) && !defined(__EMSCRIPTEN__)
     // flags used with clonefile
     static final int PREFIX_CLONE_NOFOLLOW = CLONE_NOFOLLOW;
     static final int PREFIX_CLONE_NOOWNERCOPY = CLONE_NOOWNERCOPY;
@@ -160,6 +163,8 @@ class UnixConstants {
     static final int PREFIX_FSOPT_NOFOLLOW = FSOPT_NOFOLLOW;
 #else
     // not supported (dummy values will not be used at runtime).
+    static final int PREFIX_CLONE_NOFOLLOW = 00;
+    static final int PREFIX_CLONE_NOOWNERCOPY = 00;
     static final int PREFIX_ATTR_CMN_CRTIME = 00;
     static final int PREFIX_ATTR_CMN_MODTIME = 00;
     static final int PREFIX_ATTR_CMN_ACCTIME = 00;

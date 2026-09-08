@@ -173,8 +173,11 @@ define SetupBuildLauncherBody
       LDFLAGS_macosx := $$(call SET_EXECUTABLE_ORIGIN,/../lib) \
           -L$(call FindLibDirForModule, java.base), \
       LDFLAGS_aix := -L$(SUPPORT_OUTPUTDIR)/native/java.base, \
+      LDFLAGS_emscripten := -L$(call FindLibDirForModule, java.base) \
+          -pthread -sERROR_ON_UNDEFINED_SYMBOLS=0, \
       LIBS := $(JDKEXE_LIBS) $$($1_LIBS), \
       LIBS_linux := -ljli -lpthread $(LIBDL), \
+      LIBS_emscripten := -ljli, \
       LIBS_macosx := -ljli -framework Cocoa -framework Security \
           -framework ApplicationServices, \
       LIBS_aix := -ljli_static, \

@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8"><title>WasmJVM · Swing/AWT</title>
+<style>body{font:14px system-ui;margin:20px}#c{border:1px solid #555;image-rendering:auto}
+#out{font:12px monospace;color:#888;white-space:pre-wrap;max-height:120px;overflow:auto}</style>
+<h2>WasmJVM — Swing/AWT rendering to a canvas (awt tier)</h2>
+<p>A Java2D "bouncing ball" app drawing into a <code>&lt;canvas&gt;</code>; click/drag interacts.</p>
+<canvas id="c" width="440" height="320"></canvas>
+<pre id="out"></pre>
+<script type="module">
+import { WasmJVM } from '../wasmjvm.js';
+const out = document.getElementById('out');
+const jvm = new WasmJVM({
+  runtime: { basePath: '../', tier: 'awt' },
+  app: { mainClass: 'Ball' },                       // baked into /app at build time
+  render: { canvas: '#c', width: 440, height: 320, mode: 'awt', input: true },
+  addModules: ['java.desktop'],
+  onStdout: s => { out.textContent += s + '\n'; out.scrollTop = 1e9; },
+});
+jvm.start();
+</script>

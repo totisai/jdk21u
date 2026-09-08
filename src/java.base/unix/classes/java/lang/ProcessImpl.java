@@ -67,6 +67,36 @@ final class ProcessImpl extends Process {
     // Linux platforms support a normal (non-forcible) kill signal.
     static final boolean SUPPORTS_NORMAL_TERMINATION = true;
 
+    // True on the wasm/emscripten target, where fork/exec is unavailable.
+    private static final boolean WASM_NOEXEC =
+        "emscripten".equalsIgnoreCase(System.getProperty("os.name"));
+
+    // A stand-in Process for the wasm target: no subprocess is ever spawned;
+    // it reports immediate, successful termination with empty output.
+    private static final class WasmNoExecProcess extends Process {
+        @Override public OutputStream getOutputStream() {
+            return ProcessBuilder.NullOutputStream.INSTANCE;
+        }
+        @Override public InputStream getInputStream() {
+            return ProcessBuilder.NullInputStream.INSTANCE;
+        }
+        @Override public InputStream getErrorStream() {
+            return ProcessBuilder.NullInputStream.INSTANCE;
+        }
+        @Override public int waitFor() { return 0; }
+        @Override public int exitValue() { return 0; }
+        @Override public boolean isAlive() { return false; }
+        @Override public void destroy() { }
+        @Override public Process destroyForcibly() { return this; }
+        @Override public long pid() { return -1L; }
+        @Override public java.util.concurrent.CompletableFuture<Process> onExit() {
+            return java.util.concurrent.CompletableFuture.completedFuture(this);
+        }
+        @Override public String toString() {
+            return "Process[wasm-noexec, exitValue=0]";
+        }
+    }
+
     // Cache for JNU Charset. The encoding name is guaranteed
     // to be supported in this environment.
     static final Charset JNU_CHARSET = Charset.forName(StaticProperty.jnuEncoding());
@@ -146,6 +176,16 @@ final class ProcessImpl extends Process {
             throws IOException
     {
         assert cmdarray != null && cmdarray.length > 0;
+
+        // On the wasm/emscripten target there is no fork/exec: the browser
+        // sandbox cannot spawn subprocesses. Rather than fail every launch with
+        // ENOSYS (error=52), return a synthetic process that has already exited
+        // successfully with empty output. This lets startup self-checks that
+        // shell out (e.g. IDE "temp dir is executable" probes) pass, and gives
+        // well-behaved apps an empty-output/exit-0 result instead of a crash.
+        if (WASM_NOEXEC) {
+            return new WasmNoExecProcess();
+        }
 
         // Convert arguments to a contiguous block; it's easier to do
         // memory management in Java than in C.

@@ -1,0 +1,145 @@
+public class JitBench {
+    static int jitKernel(int a, int b) {
+        int x = a + b;
+        x = x + 13 + 17;
+        x = x * 2 + 1009;
+        x = x - 3 + a;
+        x = x + 32767 + a;
+        x = x % 17 + a;
+        x = x % 3 + 2;
+        x = x + 3 + 31;
+        x = x * 29 + 29;
+        x = x * 17 + a;
+        x = x + 23 + b;
+        x = x * 5 + b;
+        x = x + 23 + 3;
+        x = x + 29 + a;
+        x = x * 23 + a;
+        x = x + 29 + 19;
+        x = x % 23 + b;
+        x = x % 19 + b;
+        x = x + 7 + a;
+        x = x - 3 + b;
+        x = x - 32767 + b;
+        x = x * 11 + 3;
+        x = x + 17 + b;
+        x = x % 5 + a;
+        x = x * 31 + 255;
+        x = x - 29 + 13;
+        x = x % 13 + b;
+        x = x * 3 + b;
+        x = x * 127 + 2;
+        x = x - 127 + 31;
+        x = x % 31 + 11;
+        x = x - 17 + b;
+        x = x + 13 + a;
+        x = x * 19 + b;
+        x = x + 5 + b;
+        x = x % 32767 + a;
+        x = x % 19 + b;
+        x = x + 32767 + b;
+        x = x - 1009 + b;
+        x = x % 13 + a;
+        x = x + 3 + a;
+        x = x + 31 + b;
+        x = x + 1009 + b;
+        x = x + 2 + 17;
+        x = x - 13 + 5;
+        x = x * 1009 + 19;
+        x = x % 255 + b;
+        x = x * 17 + 19;
+        x = x * 17 + a;
+        x = x % 7 + a;
+        x = x * 13 + a;
+        x = x + 29 + a;
+        x = x * 13 + a;
+        x = x % 29 + 5;
+        x = x - 11 + b;
+        x = x * 19 + b;
+        x = x % 19 + b;
+        x = x + 3 + 3;
+        x = x - 13 + 19;
+        x = x * 5 + 7;
+        x = x + 13 + 127;
+        return x;
+    }
+
+    static int plainKernel(int a, int b) {
+        int x = a + b;
+        x = x + 13 + 17;
+        x = x * 2 + 1009;
+        x = x - 3 + a;
+        x = x + 32767 + a;
+        x = x % 17 + a;
+        x = x % 3 + 2;
+        x = x + 3 + 31;
+        x = x * 29 + 29;
+        x = x * 17 + a;
+        x = x + 23 + b;
+        x = x * 5 + b;
+        x = x + 23 + 3;
+        x = x + 29 + a;
+        x = x * 23 + a;
+        x = x + 29 + 19;
+        x = x % 23 + b;
+        x = x % 19 + b;
+        x = x + 7 + a;
+        x = x - 3 + b;
+        x = x - 32767 + b;
+        x = x * 11 + 3;
+        x = x + 17 + b;
+        x = x % 5 + a;
+        x = x * 31 + 255;
+        x = x - 29 + 13;
+        x = x % 13 + b;
+        x = x * 3 + b;
+        x = x * 127 + 2;
+        x = x - 127 + 31;
+        x = x % 31 + 11;
+        x = x - 17 + b;
+        x = x + 13 + a;
+        x = x * 19 + b;
+        x = x + 5 + b;
+        x = x % 32767 + a;
+        x = x % 19 + b;
+        x = x + 32767 + b;
+        x = x - 1009 + b;
+        x = x % 13 + a;
+        x = x + 3 + a;
+        x = x + 31 + b;
+        x = x + 1009 + b;
+        x = x + 2 + 17;
+        x = x - 13 + 5;
+        x = x * 1009 + 19;
+        x = x % 255 + b;
+        x = x * 17 + 19;
+        x = x * 17 + a;
+        x = x % 7 + a;
+        x = x * 13 + a;
+        x = x + 29 + a;
+        x = x * 13 + a;
+        x = x % 29 + 5;
+        x = x - 11 + b;
+        x = x * 19 + b;
+        x = x % 19 + b;
+        x = x + 3 + 3;
+        x = x - 13 + 19;
+        x = x * 5 + 7;
+        x = x + 13 + 127;
+        return x;
+    }
+
+    static long runJit(int n)   { long s=0; for(int i=0;i<n;i++) s += jitKernel(i, i+1); return s; }
+    static long runPlain(int n) { long s=0; for(int i=0;i<n;i++) s += plainKernel(i, i+1); return s; }
+    public static void main(String[] args) {
+        int iters = Integer.parseInt(args.length>0?args[0]:"3000000");
+        runJit(2000); runPlain(2000);              // warmup (triggers JIT compile)
+        long t0=System.nanoTime(); long sj=runJit(iters);   long t1=System.nanoTime();
+        long sp=runPlain(iters);   long t2=System.nanoTime();
+        long jitMs=(t1-t0)/1000000, intMs=(t2-t1)/1000000;
+        System.out.println("iters="+iters+" checksum jit="+sj+" plain="+sp+" match="+(sj==sp));
+        System.out.println("JIT (wasm)   : "+jitMs+" ms");
+        System.out.println("interpreter  : "+intMs+" ms");
+        System.out.printf("speedup      : %.2fx%n", (double)intMs/Math.max(1,jitMs));
+    }
+}

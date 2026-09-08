@@ -92,7 +92,9 @@
 # include <sys/socket.h>
 # include <sys/stat.h>
 # include <sys/syscall.h>
+#ifndef __EMSCRIPTEN__
 # include <sys/sysctl.h>
+#endif
 # include <sys/time.h>
 # include <sys/times.h>
 # include <sys/types.h>
@@ -113,6 +115,10 @@
 #endif
 
 #define MAX_PATH    (2 * K)
+
+#if defined(__EMSCRIPTEN__) && !defined(OPEN_MAX)
+#define OPEN_MAX 10240
+#endif
 
 // for timer info max values which include all bits
 #define ALL_64_BITS CONST64(0xFFFFFFFFFFFFFFFF)
@@ -166,6 +172,7 @@ julong os::Bsd::available_memory() {
 // for more info see :
 // https://man.openbsd.org/sysctl.2
 void os::Bsd::print_uptime_info(outputStream* st) {
+#ifndef __EMSCRIPTEN__
   struct timeval boottime;
   size_t len = sizeof(boottime);
   int mib[2];
@@ -177,6 +184,7 @@ void os::Bsd::print_uptime_info(outputStream* st) {
     time_t currsec = time(nullptr);
     os::print_dhm(st, "OS uptime:", (long) difftime(currsec, bootsec));
   }
+#endif // __EMSCRIPTEN__
 }
 
 julong os::physical_memory() {
@@ -211,6 +219,18 @@ static char cpu_arch[] = "ppc";
 
 
 void os::Bsd::initialize_system_info() {
+#ifdef __EMSCRIPTEN__
+  // Emscripten has no sysctl; use POSIX sysconf with sane fallbacks.
+  long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+  set_processor_count(cpus >= 1 ? (int)cpus : 1);
+  long pages = sysconf(_SC_PHYS_PAGES);
+  long page_sz = sysconf(_SC_PAGE_SIZE);
+  if (pages > 0 && page_sz > 0) {
+    _physical_memory = (julong)pages * (julong)page_sz;
+  } else {
+    _physical_memory = 256 * 1024 * 1024;
+  }
+#else
   int mib[2];
   size_t len;
   int cpu_val;
@@ -265,6 +285,7 @@ void os::Bsd::initialize_system_info() {
     _physical_memory = MIN2(_physical_memory, (julong)limits.rlim_cur);
   }
 #endif
+#endif // __EMSCRIPTEN__
 }
 
 #ifdef __APPLE__
@@ -307,6 +328,30 @@ void os::init_system_properties_values() {
   //
   // Important note: if the location of libjvm.so changes this
   // code needs to be changed accordingly.
+
+#ifdef __EMSCRIPTEN__
+  // Under the Wasm sandbox os::jvm_path cannot derive a meaningful on-disk
+  // location for libjvm (it is statically linked into the launcher), so
+  // java.home comes from the JAVA_HOME env var set by the embedder/launcher,
+  // defaulting to "/jdk" where the exploded modules are preloaded.
+  {
+    const size_t bufsize = MAXPATHLEN;
+    char* buf = NEW_C_HEAP_ARRAY(char, bufsize, mtInternal);
+    const char* jh = ::getenv("JAVA_HOME");
+    if (jh == nullptr || *jh == '\0') {
+      jh = "/jdk";
+    }
+    jio_snprintf(buf, bufsize, "%s/lib", jh);
+    Arguments::set_dll_dir(buf);
+    jio_snprintf(buf, bufsize, "%s", jh);
+    Arguments::set_java_home(buf);
+    if (!set_boot_path('/', ':')) {
+      vm_exit_during_initialization("Failed setting boot class path.", nullptr);
+    }
+    FREE_C_HEAP_ARRAY(char, buf);
+    return;
+  }
+#endif // __EMSCRIPTEN__
 
   // See ld(1):
   //      The linker uses the following search paths to locate required
@@ -964,7 +1009,7 @@ bool os::dll_address_to_library_name(address addr, char* buf,
 // in case of error it checks if .dll/.so was built for the
 // same architecture as Hotspot is running on
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__EMSCRIPTEN__)
 void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
 #ifdef STATIC_BUILD
   return os::get_default_process_handle();
@@ -1193,7 +1238,7 @@ void os::print_dll_info(outputStream *st) {
 }
 
 int os::get_loaded_modules_info(os::LoadedModulesCallbackFunc callback, void *param) {
-#ifdef RTLD_DI_LINKMAP
+#if defined(RTLD_DI_LINKMAP) && !defined(__EMSCRIPTEN__)
   Dl_info dli;
   void *handle;
   Link_map *map;
@@ -1240,6 +1285,10 @@ int os::get_loaded_modules_info(os::LoadedModulesCallbackFunc callback, void *pa
 }
 
 void os::get_summary_os_info(char* buf, size_t buflen) {
+#ifdef __EMSCRIPTEN__
+  os::snprintf_checked(buf, buflen, "Emscripten");
+  return;
+#else
   // These buffers are small because we want this to be brief
   // and not use a lot of stack while generating the hs_err file.
   char os[100];
@@ -1279,6 +1328,7 @@ void os::get_summary_os_info(char* buf, size_t buflen) {
   } else
 #endif
   snprintf(buf, buflen, "%s %s", os, release);
+#endif // __EMSCRIPTEN__
 }
 
 void os::print_os_info_brief(outputStream* st) {
@@ -1330,6 +1380,10 @@ void os::pd_print_cpu_info(outputStream* st, char* buf, size_t buflen) {
 }
 
 void os::get_summary_cpu_info(char* buf, size_t buflen) {
+#ifdef __EMSCRIPTEN__
+  os::snprintf_checked(buf, buflen, "\"%s\"", cpu_arch);
+  return;
+#else
   unsigned int mhz;
   size_t size = sizeof(mhz);
   int mib[] = { CTL_HW, HW_CPU_FREQ };
@@ -1364,11 +1418,14 @@ void os::get_summary_cpu_info(char* buf, size_t buflen) {
 #else
   snprintf(buf, buflen, "\"%s\" %s %d MHz", model, machine, mhz);
 #endif
+#endif // __EMSCRIPTEN__
 }
 
 void os::print_memory_info(outputStream* st) {
+#ifndef __EMSCRIPTEN__
   xsw_usage swap_usage;
   size_t size = sizeof(swap_usage);
+#endif
 
   st->print("Memory:");
   st->print(" " SIZE_FORMAT "k page", os::vm_page_size()>>10);
@@ -1378,6 +1435,7 @@ void os::print_memory_info(outputStream* st) {
   st->print("(" UINT64_FORMAT "k free)",
             os::available_memory() >> 10);
 
+#ifndef __EMSCRIPTEN__
   if((sysctlbyname("vm.swapusage", &swap_usage, &size, nullptr, 0) == 0) || (errno == ENOMEM)) {
     if (size >= offset_of(xsw_usage, xsu_used)) {
       st->print(", swap " UINT64_FORMAT "k",
@@ -1386,6 +1444,7 @@ void os::print_memory_info(outputStream* st) {
                 ((julong) swap_usage.xsu_avail) >> 10);
     }
   }
+#endif // __EMSCRIPTEN__
 
   st->cr();
 }
@@ -1508,6 +1567,13 @@ static void warn_fail_commit_memory(char* addr, size_t size, bool exec,
 //       left at the time of mmap(). This could be a potential
 //       problem.
 bool os::pd_commit_memory(char* addr, size_t size, bool exec) {
+#ifdef __EMSCRIPTEN__
+  // Emscripten linear memory has no page protection and does not support the
+  // MAP_FIXED "commit over a PROT_NONE reservation" pattern; reserved memory is
+  // already readable/writable, so committing is a no-op.
+  (void)addr; (void)size; (void)exec;
+  return true;
+#endif
   int prot = exec ? PROT_READ|PROT_WRITE|PROT_EXEC : PROT_READ|PROT_WRITE;
 #if defined(__OpenBSD__)
   // XXX: Work-around mmap/MAP_FIXED bug temporarily on OpenBSD
@@ -1615,6 +1681,11 @@ char *os::scan_pages(char *start, char* end, page_info* page_expected, page_info
 
 
 bool os::pd_uncommit_memory(char* addr, size_t size, bool exec) {
+#ifdef __EMSCRIPTEN__
+  // No page-level uncommit in the Wasm sandbox; treat as a successful no-op.
+  (void)addr; (void)size; (void)exec;
+  return true;
+#endif
 #if defined(__OpenBSD__)
   // XXX: Work-around mmap/MAP_FIXED bug temporarily on OpenBSD
   Events::log_memprotect(nullptr, "Protecting memory [" INTPTR_FORMAT "," INTPTR_FORMAT "] with PROT_NONE", p2i(addr), p2i(addr+size));
@@ -1672,6 +1743,12 @@ char* os::pd_reserve_memory(size_t bytes, bool exec) {
 }
 
 bool os::pd_release_memory(char* addr, size_t size) {
+#ifdef __EMSCRIPTEN__
+  // Emscripten's mmap emulation cannot unmap an arbitrary sub-range; report
+  // success (the address space is simply not reclaimed).
+  (void)addr; (void)size;
+  return true;
+#endif
   return anon_munmap(addr, size);
 }
 
@@ -1694,6 +1771,12 @@ static bool bsd_mprotect(char* addr, size_t size, int prot) {
 // Set protections specified
 bool os::protect_memory(char* addr, size_t bytes, ProtType prot,
                         bool is_committed) {
+#ifdef __EMSCRIPTEN__
+  // Wasm linear memory has no page protection. Report success so callers (e.g.
+  // guard/polling pages) proceed; the protection simply has no effect.
+  (void)addr; (void)bytes; (void)prot; (void)is_committed;
+  return true;
+#endif
   unsigned int p = 0;
   switch (prot) {
   case MEM_PROT_NONE: p = PROT_NONE; break;

@@ -125,7 +125,7 @@
 <script src="jvm/jvm-tinys3.js"></script>
 <script type="module">
 import { S3Client, ListBucketsCommand, CreateBucketCommand, ListObjectsV2Command, PutObjectCommand, GetObjectCommand, DeleteObjectCommand }
-  from 'https://esm.sh/@aws-sdk/client-s3@3.556.0';
+  from './jvm/aws-s3.mjs';
 import { emunetHttpHandler } from './jvm/emunetS3Handler.js';
 
 const $ = (id) => document.getElementById(id);
